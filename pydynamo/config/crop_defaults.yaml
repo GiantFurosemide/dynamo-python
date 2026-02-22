@@ -1,0 +1,21 @@
+# Crop command — defaults (merged with user config)
+# Order: general → I/O → crop-specific
+
+# --- General ---
+pixel_size: 4.284        # Angstrom per pixel
+tomogram_size: [2000, 2000, 800]  # [nx, ny, nz] for coordinate conversion
+log_level: info
+
+# --- Input ---
+particles: null          # required: path to .tbl or .star
+vll: null                # optional: path to .vll (tomogram list)
+tomograms: null          # optional: path or list of tomogram paths
+
+# --- Output ---
+output_star: output/particles.star
+output_dir: output/subtomos
+
+# --- Crop-specific ---
+sidelength: 64           # required: cube edge in voxels (must be even)
+fill: -1                 # out-of-bounds: -2=shrink no warn, -1=shrink+warn, 0=zeros, 1=empty
+num_workers: 0           # 0=serial, >0=multiprocessing parallel over particles

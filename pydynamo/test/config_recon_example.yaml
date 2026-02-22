@@ -1,0 +1,7 @@
+# Example config for pydynamo reconstruction
+particles: output/particles.star
+subtomograms: output/subtomos
+output: output/average.mrc
+sidelength: 64
+symmetry: c1
+pixel_size: 1.32

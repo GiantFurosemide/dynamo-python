@@ -1,0 +1,26 @@
+# Quick alignment test — coarse steps for speed
+# Order: general → input → output → search → filter
+
+# --- General ---
+pixel_size: 4.284
+
+# --- Input ---
+particles: ../synthetic_data/out_subtomograms/particles.star
+subtomograms: ../synthetic_data/out_subtomograms
+reference: ../synthetic_data/emd_32820_bin4.mrc
+
+# --- Output ---
+output_table: ../synthetic_data/out_subtomograms/refined_quicktest.star
+output_star: ../synthetic_data/out_subtomograms/refined_quicktest.star
+
+# --- Angular search (coarse for speed) ---
+cone_step: 45.0
+cone_range: [0, 180]
+inplane_step: 45.0
+inplane_range: [0, 360]
+shift_search: 1
+multigrid_levels: 2
+device: auto
+
+# --- Filter ---
+lowpass: null

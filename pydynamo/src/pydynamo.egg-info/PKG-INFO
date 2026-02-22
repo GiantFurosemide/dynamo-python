@@ -1,0 +1,58 @@
+Metadata-Version: 2.4
+Name: pydynamo
+Version: 0.1.0
+Summary: Python CLI for Dynamo subtomogram averaging (crop, reconstruction, alignment, MRA)
+License: MIT
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.20
+Requires-Dist: scipy>=1.7
+Requires-Dist: mrcfile>=1.0
+Requires-Dist: starfile>=0.4
+Requires-Dist: pandas>=1.3
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: torch>=1.9
+Requires-Dist: eulerangles>=0.2
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: pytest-cov; extra == "dev"
+
+# pydynamo
+
+Python CLI for Dynamo subtomogram averaging: particle crop, reconstruction, alignment, classification (MRA).
+
+## Install
+
+```bash
+cd pydynamo && pip install -e .
+```
+
+## Usage
+
+```bash
+pydynamo <command> --i config.yaml
+
+# Examples
+pydynamo crop           --i config_crop.yaml
+pydynamo reconstruction --i config_recon.yaml
+pydynamo alignment      --i config_align.yaml
+pydynamo classification --i config_mra.yaml
+```
+
+## Config (YAML)
+
+See `docs/spec_v1.md` for full schema. Each command has required and optional keys.
+
+## One-command run
+
+```bash
+./run.sh          # runs pydynamo --help
+./run.sh crop --i config.yaml
+```
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest pydynamo/test/
+```

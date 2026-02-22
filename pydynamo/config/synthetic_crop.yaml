@@ -1,0 +1,18 @@
+# Crop on synthetic data (run from pydynamo/)
+# Order: general → input → output → crop-specific
+
+# --- General ---
+pixel_size: 4.284
+tomogram_size: [1000, 1000, 800]  # match synthetic_defaults
+
+# --- Input ---
+particles: ../synthetic_data/out_tomograms/particles.tbl
+vll: ../synthetic_data/out_tomograms/tomograms.vll
+
+# --- Output ---
+output_star: ../synthetic_data/out_subtomograms/particles.star
+output_dir: ../synthetic_data/out_subtomograms
+
+# --- Crop-specific ---
+sidelength: 64
+fill: -1

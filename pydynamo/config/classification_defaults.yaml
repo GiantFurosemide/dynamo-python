@@ -1,0 +1,28 @@
+# Classification (MRA) command — defaults
+# Order: general → I/O → iteration → alignment params
+
+# --- General ---
+pixel_size: 4.284
+log_level: info
+
+# --- Input ---
+particles: null          # path to .tbl or .star
+subtomograms: null       # path to subtomogram dir
+references: []           # list of reference MRC paths
+tables: null             # list of initial table paths per ref
+vll: null
+
+# --- Output ---
+output_dir: mra_output
+
+# --- Iteration ---
+max_iterations: 5
+swap: true               # each particle aligned to all refs
+threshold: 0.0           # CC threshold for averaging
+
+# --- Alignment (per iteration) ---
+cone_step: 15.0
+cone_range: [0, 180]
+inplane_step: 15.0
+inplane_range: [0, 360]
+lowpass: null

@@ -1,0 +1,17 @@
+# Reconstruction on synthetic data (no wedge)
+# Order: general → input → output → average → wedge
+
+# --- General ---
+pixel_size: 4.284
+
+# --- Input ---
+particles: ../synthetic_data/out_subtomograms/particles.star
+subtomograms: ../synthetic_data/out_subtomograms
+
+# --- Output ---
+output: ../synthetic_data/out_subtomograms/average.mrc
+
+# --- Average ---
+sidelength: 64
+symmetry: c1
+apply_wedge: false

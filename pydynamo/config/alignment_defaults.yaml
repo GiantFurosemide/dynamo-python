@@ -1,0 +1,33 @@
+# Alignment command — Dynamo dcp compatible
+# Order: general → I/O → search params → masks
+
+# --- General ---
+pixel_size: 4.284
+log_level: info
+
+# --- Input ---
+particles: null          # path to .tbl or .star
+subtomograms: null       # path to subtomogram dir
+reference: null          # path to reference MRC
+vll: null
+
+# --- Output ---
+output_table: output/refined.tbl
+output_star: null        # if set, write star instead of tbl
+
+# --- Angular search (Dynamo card) ---
+cone_step: 15.0          # tilt search step (deg)
+cone_range: [0, 180]     # tilt search range (deg)
+inplane_step: 15.0       # narot/psi search step (deg)
+inplane_range: [0, 360]  # narot/psi search range (deg)
+shift_search: 3          # shift search radius (voxels)
+multigrid_levels: 2      # coarse-to-fine; 1=single scale
+device: auto             # cpu | cuda | auto
+
+# --- Filtering ---
+lowpass: null            # Angstrom; bandpass before alignment; null=no filter
+
+# --- Masks ---
+fmask: null
+fmask_classification: null
+use_gpu: true

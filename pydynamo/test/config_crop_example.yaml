@@ -1,0 +1,9 @@
+# Example config for pydynamo crop
+particles: particles.tbl
+vll: tomograms.vll
+sidelength: 64
+output_star: output/particles.star
+output_dir: output/subtomos
+fill: -1
+# pixel_size: 1.32
+# tomogram_size: [512, 512, 200]

@@ -1,0 +1,26 @@
+# Alignment on synthetic data
+# Order: general → input → output → search → filter
+
+# --- General ---
+pixel_size: 4.284
+
+# --- Input ---
+particles: ../synthetic_data/out_subtomograms/particles.star
+subtomograms: ../synthetic_data/out_subtomograms
+reference: ../synthetic_data/emd_32820_bin4.mrc
+
+# --- Output ---
+output_table: ../synthetic_data/out_subtomograms/refined.star
+output_star: ../synthetic_data/out_subtomograms/refined.star
+
+# --- Angular search ---
+cone_step: 20.0
+cone_range: [0, 180]
+inplane_step: 20.0
+inplane_range: [0, 360]
+shift_search: 2
+multigrid_levels: 2
+device: auto
+
+# --- Filter ---
+lowpass: null

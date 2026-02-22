@@ -1,0 +1,26 @@
+# Reconstruction on synthetic data WITH missing wedge
+# Use with synthetic_data_withMissingWedge
+# Order: general → input → output → average → wedge
+
+# --- General ---
+pixel_size: 4.284
+
+# --- Input ---
+particles: ../synthetic_data_withMissingWedge/out_subtomograms/particles.star
+subtomograms: ../synthetic_data_withMissingWedge/out_subtomograms
+
+# --- Output ---
+output: ../synthetic_data_withMissingWedge/out_subtomograms/average.mrc
+
+# --- Average ---
+sidelength: 64
+symmetry: c1
+
+# --- Wedge ---
+apply_wedge: true
+wedge_ftype: 1
+wedge_ymin: -48
+wedge_ymax: 48
+wedge_xmin: -60
+wedge_xmax: 60
+fcompensate: true

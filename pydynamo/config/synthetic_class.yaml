@@ -1,0 +1,26 @@
+# Classification (MRA) on synthetic data (real + noise, 2 refs)
+# Order: general → input → output → iteration → alignment
+
+# --- General ---
+pixel_size: 4.284
+
+# --- Input ---
+particles: ../synthetic_data/out_tomograms4classification/particles.star
+subtomograms: ../synthetic_data/out_tomograms4classification
+references:
+  - ../synthetic_data/emd_32820_bin4.mrc
+  - ../synthetic_data/emd_32820_bin4.mrc
+
+# --- Output ---
+output_dir: ../synthetic_data/mra_output
+
+# --- Iteration ---
+max_iterations: 2
+swap: true
+
+# --- Alignment (per iteration) ---
+cone_step: 30.0
+cone_range: [0, 180]
+inplane_step: 30.0
+inplane_range: [0, 360]
+lowpass: null

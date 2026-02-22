@@ -1,0 +1,27 @@
+# Synthetic data generation — with missing wedge
+# Order: general → sampling → tomogram → wedge → output
+
+# --- General ---
+pixel_size: 4.284
+seed: 42
+
+# --- Template & output ---
+template: ../synthetic_data/emd_32820_bin4.mrc
+output_root: ../synthetic_data_withMissingWedge
+
+# --- Sampling ---
+n_particles: 100
+n_noise: 50
+tomogram_size: [1000, 1000, 800]
+
+# --- Tomogram ---
+noise_sigma: 0.01
+particle_scale_ratio: 3.0
+
+# --- Wedge (Dynamo tbl cols 13-17; ftype=1: kZ-kY plane) ---
+apply_missing_wedge: true
+wedge_ftype: 1           # single tilt about Y
+wedge_ymin: -48
+wedge_ymax: 48
+wedge_xmin: -60
+wedge_xmax: 60
