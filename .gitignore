@@ -1,2 +1,5 @@
 dynamo-src/*
 .vscode/*
+synthetic_data/*
+synthetic_data_withMissingWedge
+.DS_Store
