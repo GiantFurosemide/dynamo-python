@@ -1,26 +1,33 @@
-# Quick alignment test — coarse steps for speed
-# Order: general → input → output → search → filter
+# Synthetic quick alignment example: coarse search for fast sanity checks
 
 # --- General ---
-pixel_size: 4.284
+pixel_size: 4.284                                                # Angstrom per pixel
+log_level: info                                                  # logging level: debug|info|warning|error
 
 # --- Input ---
-particles: ../synthetic_data/out_subtomograms/particles.star
-subtomograms: ../synthetic_data/out_subtomograms
-reference: ../synthetic_data/emd_32820_bin4.mrc
+particles: ../synthetic_data/out_subtomograms/particles.star     # particle metadata input
+subtomograms: ../synthetic_data/out_subtomograms                 # subtomogram directory
+reference: ../synthetic_data/emd_32820_bin4.mrc                  # alignment reference volume
+vll: null                                                        # optional vll path for tbl workflows
 
 # --- Output ---
-output_table: ../synthetic_data/out_subtomograms/refined_quicktest.star
-output_star: ../synthetic_data/out_subtomograms/refined_quicktest.star
+output_table: ../synthetic_data/out_subtomograms/refined_quicktest.star  # refined output path
+output_star: ../synthetic_data/out_subtomograms/refined_quicktest.star   # explicit star output path
 
-# --- Angular search (coarse for speed) ---
-cone_step: 45.0
-cone_range: [0, 180]
-inplane_step: 45.0
-inplane_range: [0, 360]
-shift_search: 1
-multigrid_levels: 2
-device: auto
+# --- Search ---
+cone_step: 45.0                                                  # coarse tilt step (degrees)
+cone_range: [0, 180]                                             # tilt range [min,max] (degrees)
+inplane_step: 45.0                                               # coarse inplane step (degrees)
+inplane_range: [0, 360]                                          # inplane range [min,max] (degrees)
+shift_search: 1                                                  # translational search radius (voxels)
+multigrid_levels: 2                                              # coarse-to-fine levels
+
+# --- Device ---
+device: auto                                                     # cpu|cuda|auto; auto uses all detected GPUs
+device_id: null                                                  # optional single GPU id override
+gpu_ids: null                                                    # optional explicit GPU id list; null means all detected GPUs
 
 # --- Filter ---
-lowpass: null
+lowpass: null                                                    # optional lowpass cutoff in Angstrom
+fmask: null                                                      # optional Fourier mask path (reserved)
+fmask_classification: null                                       # optional classification mask path (reserved)

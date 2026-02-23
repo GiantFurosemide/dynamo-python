@@ -1,5 +1,6 @@
 """pydynamo crop — extract subtomograms from tomograms."""
 import logging
+import os
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -65,7 +66,7 @@ def run(config_path: str, rest: list, args) -> int:
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    num_workers = int(config.get("num_workers", 0))
+    num_workers = _resolve_num_workers(config.get("num_workers", 0))
 
     # Load particle table
     if isinstance(particles_in, str):
@@ -131,7 +132,7 @@ def run(config_path: str, rest: list, args) -> int:
         tasks.append((tomo_path, x, y, z, sidelength, fill, str(output_dir), tag, row_dict))
 
     out_rows = []
-    if num_workers <= 0:
+    if num_workers <= 1:
         for t in tasks:
             tomo_path, x, y, z, sl, fl, od, tag, rd = t
             out_row, ok = _crop_one(tomo_path, x, y, z, sl, fl, od, tag, rd)
@@ -161,6 +162,17 @@ def run(config_path: str, rest: list, args) -> int:
     logger.info("Cropped %d particles to %s", len(out_rows), output_dir)
     logger.info("Output star: %s", output_star)
     return 0
+
+
+def _resolve_num_workers(num_workers_value) -> int:
+    """Resolve crop workers. <=0 means use all detected CPUs."""
+    try:
+        n = int(num_workers_value)
+    except Exception:
+        n = 0
+    if n <= 0:
+        return max(1, int(os.cpu_count() or 1))
+    return n
 
 
 def _resolve_tomogram_paths(tomograms, vll_df):

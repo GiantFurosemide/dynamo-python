@@ -1,28 +1,34 @@
-# Classification (MRA) command — defaults
-# Order: general → I/O → iteration → alignment params
+# Classification (MRA) defaults: general -> input -> output -> iteration -> alignment -> device
 
 # --- General ---
-pixel_size: 4.284
-log_level: info
+pixel_size: 4.284          # Angstrom per pixel for coordinate/filter conversion
+log_level: info            # logging level: debug|info|warning|error
 
 # --- Input ---
-particles: null          # path to .tbl or .star
-subtomograms: null       # path to subtomogram dir
-references: []           # list of reference MRC paths
-tables: null             # list of initial table paths per ref
-vll: null
+particles: null            # required: path to particle metadata (.tbl or .star)
+subtomograms: null         # required: directory containing subtomogram .mrc/.mrcs volumes
+references: []             # required: list of reference .mrc files
+tables: null               # optional: list of initial tables per reference
+vll: null                  # optional: vll file when using Dynamo tbl input
 
 # --- Output ---
-output_dir: mra_output
+output_dir: mra_output     # required: root output directory for per-iteration results
 
 # --- Iteration ---
-max_iterations: 5
-swap: true               # each particle aligned to all refs
-threshold: 0.0           # CC threshold for averaging
+max_iterations: 5          # maximum MRA iterations
+swap: true                 # true: each particle aligns to all references each iteration
+threshold: 0.0             # optional CC threshold for averaging/selection
 
-# --- Alignment (per iteration) ---
-cone_step: 15.0
-cone_range: [0, 180]
-inplane_step: 15.0
-inplane_range: [0, 360]
-lowpass: null
+# --- Alignment ---
+cone_step: 15.0            # tilt angular step in degrees
+cone_range: [0, 180]       # tilt angular range [min,max] in degrees
+inplane_step: 15.0         # inplane angular step in degrees
+inplane_range: [0, 360]    # inplane angular range [min,max] in degrees
+shift_search: 3            # translational search radius in voxels
+multigrid_levels: 2        # coarse-to-fine levels, 1 means single-scale
+lowpass: null              # optional lowpass cutoff in Angstrom; null disables lowpass
+
+# --- Device ---
+device: auto               # execution device: cpu|cuda|auto (auto uses all detected GPUs)
+device_id: null            # optional single GPU id override
+gpu_ids: null              # optional explicit GPU id list; null means all detected GPUs

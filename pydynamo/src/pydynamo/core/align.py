@@ -106,8 +106,9 @@ def _align_one_particle_torch_gpu(
     lowpass_angstrom: float,
     pixel_size: float,
     multigrid_levels: int,
+    device_id: int = None,
 ):
-    """PyTorch GPU path. Requires CUDA. Uses NumPy for search (batched GPU impl TBD)."""
+    """PyTorch GPU path. Uses GPU for shift + NCC search."""
     import torch
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA not available")
@@ -120,10 +121,13 @@ def _align_one_particle_torch_gpu(
     if lowpass_angstrom and pixel_size > 0:
         p = _lowpass_filter(particle, lowpass_angstrom, pixel_size)
         r = _lowpass_filter(reference, lowpass_angstrom, pixel_size)
+    device = torch.device(f"cuda:{device_id}") if device_id is not None else torch.device("cuda")
+
     if multigrid_levels <= 1:
-        return _align_single_scale(
+        return _align_single_scale_torch_gpu(
             p, r, mask, cone_step, inplane_step, shift_search,
             tilt_lo=tilt_lo, tilt_hi=tilt_hi, inplane_lo=inplane_lo, inplane_hi=inplane_hi,
+            device=device,
         )
     factor = 2
     p_coarse = _downsample(p, factor)
@@ -131,9 +135,10 @@ def _align_one_particle_torch_gpu(
     mask_coarse = _downsample(mask.astype(np.float32), factor) > 0.5
     coarse_step_c = max(cone_step * 2, 30.0)
     coarse_step_i = max(inplane_step * 2, 30.0)
-    tdrot, tilt, narot, dx_c, dy_c, dz_c, _ = _align_single_scale(
+    tdrot, tilt, narot, dx_c, dy_c, dz_c, _ = _align_single_scale_torch_gpu(
         p_coarse, ref_coarse, mask_coarse,
         coarse_step_c, coarse_step_i, max(1, shift_search // 2),
+        device=device,
     )
     shift_center = (int(dx_c * factor), int(dy_c * factor), int(dz_c * factor))
     margin = max(cone_step, inplane_step)
@@ -143,12 +148,148 @@ def _align_one_particle_torch_gpu(
     inplane_hi = (narot + margin + 1) % 360
     if inplane_lo > inplane_hi:
         inplane_lo, inplane_hi = 0, 360
-    return _align_single_scale(
+    return _align_single_scale_torch_gpu(
         p, r, mask, cone_step, inplane_step, shift_search,
         tilt_lo=tilt_lo, tilt_hi=tilt_hi,
         inplane_lo=inplane_lo, inplane_hi=inplane_hi if inplane_hi > inplane_lo else 360,
         shift_center=shift_center,
+        device=device,
     )
+
+
+def _shift_tensor_zero(vol_t, dx: int, dy: int, dz: int):
+    """Shift 3D tensor with zero padding (not circular roll)."""
+    import torch
+
+    out = torch.zeros_like(vol_t)
+    sz0, sz1, sz2 = vol_t.shape
+
+    if dx >= 0:
+        src0_s, src0_e = 0, sz0 - dx
+        dst0_s, dst0_e = dx, sz0
+    else:
+        src0_s, src0_e = -dx, sz0
+        dst0_s, dst0_e = 0, sz0 + dx
+
+    if dy >= 0:
+        src1_s, src1_e = 0, sz1 - dy
+        dst1_s, dst1_e = dy, sz1
+    else:
+        src1_s, src1_e = -dy, sz1
+        dst1_s, dst1_e = 0, sz1 + dy
+
+    if dz >= 0:
+        src2_s, src2_e = 0, sz2 - dz
+        dst2_s, dst2_e = dz, sz2
+    else:
+        src2_s, src2_e = -dz, sz2
+        dst2_s, dst2_e = 0, sz2 + dz
+
+    if src0_s >= src0_e or src1_s >= src1_e or src2_s >= src2_e:
+        return out
+    out[dst0_s:dst0_e, dst1_s:dst1_e, dst2_s:dst2_e] = vol_t[src0_s:src0_e, src1_s:src1_e, src2_s:src2_e]
+    return out
+
+
+def _ncc_torch(a_t, b_t, mask_t):
+    """Normalized cross correlation on masked voxels (torch tensors)."""
+    import torch
+
+    ma = a_t[mask_t]
+    mb = b_t[mask_t]
+    if ma.numel() == 0:
+        return 0.0
+    ma = ma - torch.mean(ma)
+    mb = mb - torch.mean(mb)
+    denom = torch.sqrt(torch.sum(ma * ma) * torch.sum(mb * mb))
+    if float(denom) < 1e-12:
+        return 0.0
+    return float(torch.sum(ma * mb) / denom)
+
+
+def _align_single_scale_torch_gpu(
+    particle: np.ndarray,
+    reference: np.ndarray,
+    mask: np.ndarray,
+    cone_step: float,
+    inplane_step: float,
+    shift_search: int,
+    tilt_lo: float = 0.0,
+    tilt_hi: float = 180.0,
+    inplane_lo: float = 0.0,
+    inplane_hi: float = 360.0,
+    shift_center: tuple = (0, 0, 0),
+    device=None,
+) -> tuple:
+    """Single-scale alignment where shift + NCC evaluation runs on GPU."""
+    import torch
+    import torch.nn.functional as F
+
+    if device is None:
+        device = torch.device("cuda")
+
+    if mask is None:
+        mask = np.ones_like(particle, dtype=bool)
+    mask_t = torch.as_tensor(mask.astype(bool), device=device)
+    part_t = torch.as_tensor((particle * mask).astype(np.float32), device=device)
+    ref_src_t = torch.as_tensor(reference.astype(np.float32), device=device)
+    cx, cy, cz = shift_center
+
+    def _rotate_volume_torch_gpu(vol_t, tdrot: float, tilt: float, narot: float):
+        """Rotate volume on GPU using trilinear sampling (ZXZ, degrees)."""
+        mat_np = Rotation.from_euler("ZXZ", [tdrot, tilt, narot], degrees=True).as_matrix().astype(np.float32)
+        mat_t = torch.as_tensor(mat_np, device=device)
+        d, h, w = vol_t.shape
+        center = torch.tensor([(d - 1) / 2.0, (h - 1) / 2.0, (w - 1) / 2.0], device=device, dtype=torch.float32)
+
+        zz, yy, xx = torch.meshgrid(
+            torch.arange(d, device=device, dtype=torch.float32),
+            torch.arange(h, device=device, dtype=torch.float32),
+            torch.arange(w, device=device, dtype=torch.float32),
+            indexing="ij",
+        )
+        coords = torch.stack([zz, yy, xx], dim=0).reshape(3, -1)
+        coords_centered = coords - center[:, None]
+        rot = mat_t @ coords_centered
+        rot = rot + center[:, None]
+        z = rot[0].reshape(d, h, w)
+        y = rot[1].reshape(d, h, w)
+        x = rot[2].reshape(d, h, w)
+        grid = torch.stack(
+            [
+                (2.0 * x / max(1.0, float(w - 1))) - 1.0,
+                (2.0 * y / max(1.0, float(h - 1))) - 1.0,
+                (2.0 * z / max(1.0, float(d - 1))) - 1.0,
+            ],
+            dim=-1,
+        ).unsqueeze(0)
+        out = F.grid_sample(
+            vol_t.unsqueeze(0).unsqueeze(0),
+            grid,
+            mode="bilinear",
+            padding_mode="zeros",
+            align_corners=True,
+        )
+        return out[0, 0]
+
+    best_cc = -2.0
+    best_params = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    tilts = np.arange(tilt_lo, min(tilt_hi + cone_step * 0.5, 181), cone_step)
+    for tilt in tilts:
+        inplanes = np.arange(inplane_lo, inplane_hi, inplane_step) if tilt not in (0, 180) else [0]
+        for narot in inplanes:
+            ref_t = _rotate_volume_torch_gpu(ref_src_t, 0.0, float(tilt), float(narot))
+            for sx in range(-shift_search, shift_search + 1):
+                for sy in range(-shift_search, shift_search + 1):
+                    for sz in range(-shift_search, shift_search + 1):
+                        dx, dy, dz = cx + sx, cy + sy, cz + sz
+                        ref_shifted_t = _shift_tensor_zero(ref_t, int(dx), int(dy), int(dz))
+                        cc = _ncc_torch(part_t, ref_shifted_t, mask_t)
+                        if cc > best_cc:
+                            best_cc = cc
+                            best_params = (0.0, tilt, narot, float(dx), float(dy), float(dz))
+
+    return best_params + (best_cc,)
 
 
 def _lowpass_filter(vol: np.ndarray, lowpass_angstrom: float, pixel_size: float) -> np.ndarray:
@@ -183,6 +324,7 @@ def align_one_particle(
     pixel_size: float = 1.0,
     multigrid_levels: int = 1,
     device: str = "cpu",
+    device_id: int = None,
 ):
     """
     Search for best alignment of particle to reference.
@@ -200,7 +342,7 @@ def align_one_particle(
             return _align_one_particle_torch_gpu(
                 particle, reference, mask,
                 cone_step, cone_range, inplane_step, inplane_range,
-                shift_search, lowpass_angstrom, pixel_size, multigrid_levels,
+                shift_search, lowpass_angstrom, pixel_size, multigrid_levels, device_id=device_id,
             )
         except RuntimeError:
             pass  # fallback to CPU when CUDA unavailable

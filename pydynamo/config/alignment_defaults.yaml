@@ -1,33 +1,36 @@
-# Alignment command — Dynamo dcp compatible
-# Order: general → I/O → search params → masks
+# Alignment defaults (Dynamo dcp style): general -> input -> output -> search -> filters -> masks
 
 # --- General ---
-pixel_size: 4.284
-log_level: info
+pixel_size: 4.284                 # Angstrom per pixel used for lowpass conversion
+log_level: info                   # logging level: debug|info|warning|error
 
 # --- Input ---
-particles: null          # path to .tbl or .star
-subtomograms: null       # path to subtomogram dir
-reference: null          # path to reference MRC
-vll: null
+particles: null                   # required: path to particle metadata (.tbl or .star)
+subtomograms: null                # required: directory containing particle .mrc/.mrcs volumes
+reference: null                   # required: path to reference volume .mrc
+vll: null                         # optional: tomogram list file when using Dynamo tbl input
 
 # --- Output ---
-output_table: output/refined.tbl
-output_star: null        # if set, write star instead of tbl
+output_table: output/refined.tbl  # required: output refined table/star path
+output_star: null                 # optional: if set, write star; otherwise follows output_table extension
 
-# --- Angular search (Dynamo card) ---
-cone_step: 15.0          # tilt search step (deg)
-cone_range: [0, 180]     # tilt search range (deg)
-inplane_step: 15.0       # narot/psi search step (deg)
-inplane_range: [0, 360]  # narot/psi search range (deg)
-shift_search: 3          # shift search radius (voxels)
-multigrid_levels: 2      # coarse-to-fine; 1=single scale
-device: auto             # cpu | cuda | auto
+# --- Search ---
+cone_step: 15.0                   # tilt angular step in degrees
+cone_range: [0, 180]              # tilt angular range [min,max] in degrees
+inplane_step: 15.0                # inplane angular step in degrees
+inplane_range: [0, 360]           # inplane angular range [min,max] in degrees
+shift_search: 3                   # translational search radius in voxels
+multigrid_levels: 2               # coarse-to-fine levels, 1 means single-scale
 
-# --- Filtering ---
-lowpass: null            # Angstrom; bandpass before alignment; null=no filter
+# --- Device ---
+device: auto                      # execution device: cpu|cuda|auto (auto uses all detected GPUs)
+device_id: null                   # optional single GPU id override (e.g., 0)
+gpu_ids: null                     # optional explicit GPU id list (e.g., [0,1]); null means all detected GPUs
+
+# --- Filter ---
+lowpass: null                     # optional lowpass cutoff in Angstrom; null disables lowpass
 
 # --- Masks ---
-fmask: null
-fmask_classification: null
-use_gpu: true
+fmask: null                       # optional Fourier mask file path (reserved)
+fmask_classification: null        # optional classification Fourier mask path (reserved)
+use_gpu: true                     # compatibility flag; actual selection controlled by device/device_id/gpu_ids

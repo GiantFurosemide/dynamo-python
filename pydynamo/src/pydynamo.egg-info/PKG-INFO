@@ -19,7 +19,7 @@ Requires-Dist: pytest-cov; extra == "dev"
 
 # pydynamo
 
-Python CLI for Dynamo subtomogram averaging: particle crop, reconstruction, alignment, classification (MRA).
+Python CLI for Dynamo subtomogram averaging: crop, reconstruction, alignment, classification (MRA).
 
 ## Install
 
@@ -27,32 +27,32 @@ Python CLI for Dynamo subtomogram averaging: particle crop, reconstruction, alig
 cd pydynamo && pip install -e .
 ```
 
-## Usage
+## Run
 
 ```bash
 pydynamo <command> --i config.yaml
-
-# Examples
-pydynamo crop           --i config_crop.yaml
-pydynamo reconstruction --i config_recon.yaml
-pydynamo alignment      --i config_align.yaml
-pydynamo classification --i config_mra.yaml
 ```
 
-## Config (YAML)
+| Command | Config example |
+|---------|----------------|
+| `gen_synthetic` | `config/synthetic_defaults.yaml` |
+| `crop` | `config/synthetic_crop.yaml` |
+| `reconstruction` | `config/synthetic_recon.yaml` |
+| `alignment` | `config/synthetic_align.yaml` |
+| `classification` | `config/synthetic_class.yaml` |
 
-See `docs/spec_v1.md` for full schema. Each command has required and optional keys.
-
-## One-command run
+## Quick test
 
 ```bash
-./run.sh          # runs pydynamo --help
-./run.sh crop --i config.yaml
+cd pydynamo
+OMP_NUM_THREADS=1 pydynamo gen_synthetic --i config/synthetic_defaults.yaml
+pydynamo crop --i config/synthetic_crop.yaml
+pydynamo reconstruction --i config/synthetic_recon.yaml
 ```
 
-## Development
+## Troubleshooting
 
+**OMP Error #179** — Set before running:
 ```bash
-pip install -e ".[dev]"
-pytest pydynamo/test/
+export OMP_NUM_THREADS=1
 ```

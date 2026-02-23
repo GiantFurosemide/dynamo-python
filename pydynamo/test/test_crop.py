@@ -9,6 +9,7 @@ import starfile
 import pytest
 
 from pydynamo.core.crop import crop_volume, load_tomogram, save_subtomo
+from pydynamo.commands.crop import _resolve_num_workers
 from pydynamo.io import read_dynamo_tbl, read_vll_to_df, create_dynamo_table
 
 
@@ -71,3 +72,9 @@ def test_read_write_dynamo_tbl():
         df = read_dynamo_tbl(str(tbl_path))
         assert len(df) == 5
         np.testing.assert_allclose(df[["x", "y", "z"]].values, coords, rtol=1e-4)
+
+
+def test_resolve_num_workers_auto():
+    """num_workers<=0 resolves to all detected CPUs."""
+    assert _resolve_num_workers(0) >= 1
+    assert _resolve_num_workers(-1) >= 1

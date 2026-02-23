@@ -1,18 +1,20 @@
-# Crop on synthetic data (run from pydynamo/)
-# Order: general → input → output → crop-specific
+# Synthetic crop example: general -> input -> output -> crop-specific
 
 # --- General ---
-pixel_size: 4.284
-tomogram_size: [1000, 1000, 800]  # match synthetic_defaults
+pixel_size: 4.284                                    # Angstrom per pixel for centered-coordinate conversion
+tomogram_size: [1000, 1000, 800]                     # tomogram size [nx,ny,nz] matching synthetic defaults
+log_level: info                                      # logging level: debug|info|warning|error
 
 # --- Input ---
-particles: ../synthetic_data/out_tomograms/particles.tbl
-vll: ../synthetic_data/out_tomograms/tomograms.vll
+particles: ../synthetic_data/out_tomograms/particles.tbl  # particle metadata (.tbl)
+vll: ../synthetic_data/out_tomograms/tomograms.vll        # vll tomogram mapping for tbl input
+tomograms: null                                      # optional direct tomogram path/list when vll not used
 
 # --- Output ---
-output_star: ../synthetic_data/out_subtomograms/particles.star
-output_dir: ../synthetic_data/out_subtomograms
+output_star: ../synthetic_data/out_subtomograms/particles.star  # output particle star metadata
+output_dir: ../synthetic_data/out_subtomograms                  # output subtomogram directory
 
 # --- Crop-specific ---
-sidelength: 64
-fill: -1
+sidelength: 64                                      # cropped cube edge length in voxels
+fill: -1                                            # boundary policy: -2 shrink, -1 shrink+warn, 0 zero-pad, 1 skip
+num_workers: 0                                      # worker count; <=0 means auto-use all detected CPUs

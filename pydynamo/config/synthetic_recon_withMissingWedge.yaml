@@ -1,26 +1,30 @@
-# Reconstruction on synthetic data WITH missing wedge
-# Use with synthetic_data_withMissingWedge
-# Order: general → input → output → average → wedge
+# Synthetic reconstruction with missing wedge: general -> input -> output -> averaging -> wedge
 
 # --- General ---
-pixel_size: 4.284
+pixel_size: 4.284                                                   # Angstrom per pixel
+tomogram_size: [1000, 1000, 800]                                    # reference tomogram size [nx,ny,nz]
+log_level: info                                                     # logging level: debug|info|warning|error
 
 # --- Input ---
-particles: ../synthetic_data_withMissingWedge/out_subtomograms/particles.star
-subtomograms: ../synthetic_data_withMissingWedge/out_subtomograms
+particles: ../synthetic_data_withMissingWedge/out_subtomograms/particles.star  # particle metadata input
+subtomograms: ../synthetic_data_withMissingWedge/out_subtomograms              # subtomogram directory input
+vll: null                                                           # optional vll path for tbl workflows
+tags: null                                                          # optional subset of tags for averaging
 
 # --- Output ---
-output: ../synthetic_data_withMissingWedge/out_subtomograms/average.mrc
+output: ../synthetic_data_withMissingWedge/out_subtomograms/average.mrc  # output averaged volume path
 
-# --- Average ---
-sidelength: 64
-symmetry: c1
+# --- Averaging ---
+sidelength: 64                                                      # subtomogram edge length in voxels
+symmetry: c1                                                        # symmetry group (c1,c2,c4,...)
+fmask: null                                                         # optional Fourier mask path
+nmask: null                                                         # optional real-space mask path
 
 # --- Wedge ---
-apply_wedge: true
-wedge_ftype: 1
-wedge_ymin: -48
-wedge_ymax: 48
-wedge_xmin: -60
-wedge_xmax: 60
-fcompensate: true
+apply_wedge: true                                                   # enable wedge weighting in averaging
+wedge_ftype: 1                                                      # wedge type: 0 full,1 Y-single,2 X-single,3 cone,4 double
+wedge_ymin: -48                                                     # Y-axis minimum tilt angle (degrees)
+wedge_ymax: 48                                                      # Y-axis maximum tilt angle (degrees)
+wedge_xmin: -60                                                     # X-axis minimum tilt angle (degrees)
+wedge_xmax: 60                                                      # X-axis maximum tilt angle (degrees)
+fcompensate: true                                                   # divide by wedge weights in Fourier domain

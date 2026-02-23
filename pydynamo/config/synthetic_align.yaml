@@ -1,26 +1,33 @@
-# Alignment on synthetic data
-# Order: general → input → output → search → filter
+# Synthetic alignment example: general -> input -> output -> search -> device -> filter
 
 # --- General ---
-pixel_size: 4.284
+pixel_size: 4.284                                      # Angstrom per pixel for filter/origin conversion
+log_level: info                                        # logging level: debug|info|warning|error
 
 # --- Input ---
-particles: ../synthetic_data/out_subtomograms/particles.star
-subtomograms: ../synthetic_data/out_subtomograms
-reference: ../synthetic_data/emd_32820_bin4.mrc
+particles: ../synthetic_data/out_subtomograms/particles.star  # particle metadata input
+subtomograms: ../synthetic_data/out_subtomograms              # subtomogram directory
+reference: ../synthetic_data/emd_32820_bin4.mrc               # alignment reference volume
+vll: null                                              # optional vll path for tbl workflows
 
 # --- Output ---
-output_table: ../synthetic_data/out_subtomograms/refined.star
-output_star: ../synthetic_data/out_subtomograms/refined.star
+output_table: ../synthetic_data/out_subtomograms/refined.star  # refined metadata output path
+output_star: ../synthetic_data/out_subtomograms/refined.star   # explicit star output path
 
-# --- Angular search ---
-cone_step: 20.0
-cone_range: [0, 180]
-inplane_step: 20.0
-inplane_range: [0, 360]
-shift_search: 2
-multigrid_levels: 2
-device: auto
+# --- Search ---
+cone_step: 20.0                                        # tilt search step (degrees)
+cone_range: [0, 180]                                   # tilt search range [min,max] (degrees)
+inplane_step: 20.0                                     # inplane search step (degrees)
+inplane_range: [0, 360]                                # inplane search range [min,max] (degrees)
+shift_search: 2                                        # translational search radius (voxels)
+multigrid_levels: 2                                    # coarse-to-fine levels
+
+# --- Device ---
+device: auto                                           # cpu|cuda|auto; auto uses all detected GPUs
+device_id: null                                        # optional single GPU id override
+gpu_ids: null                                          # optional explicit GPU id list; null means all detected GPUs
 
 # --- Filter ---
-lowpass: null
+lowpass: null                                          # optional lowpass cutoff in Angstrom, null disables
+fmask: null                                            # optional Fourier mask path (reserved)
+fmask_classification: null                             # optional classification mask path (reserved)

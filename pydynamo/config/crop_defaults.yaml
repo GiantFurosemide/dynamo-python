@@ -1,21 +1,20 @@
-# Crop command — defaults (merged with user config)
-# Order: general → I/O → crop-specific
+# Crop defaults: general -> input -> output -> crop-specific
 
 # --- General ---
-pixel_size: 4.284        # Angstrom per pixel
-tomogram_size: [2000, 2000, 800]  # [nx, ny, nz] for coordinate conversion
-log_level: info
+pixel_size: 4.284               # Angstrom per pixel for centered-coordinate conversion
+tomogram_size: [2000, 2000, 800]  # tomogram size [nx,ny,nz] used for centered->absolute coordinates
+log_level: info                 # logging level: debug|info|warning|error
 
 # --- Input ---
-particles: null          # required: path to .tbl or .star
-vll: null                # optional: path to .vll (tomogram list)
-tomograms: null          # optional: path or list of tomogram paths
+particles: null                 # required: particle metadata path (.tbl or .star)
+vll: null                       # optional: Dynamo .vll tomogram list file
+tomograms: null                 # optional: tomogram path or list (used when vll not provided)
 
 # --- Output ---
-output_star: output/particles.star
-output_dir: output/subtomos
+output_star: output/particles.star  # required: output star metadata path for cropped particles
+output_dir: output/subtomos         # required: output directory for cropped subtomogram files
 
 # --- Crop-specific ---
-sidelength: 64           # required: cube edge in voxels (must be even)
-fill: -1                 # out-of-bounds: -2=shrink no warn, -1=shrink+warn, 0=zeros, 1=empty
-num_workers: 0           # 0=serial, >0=multiprocessing parallel over particles
+sidelength: 64                  # required: cropped cube edge length in voxels (must be even)
+fill: -1                        # out-of-bounds policy: -2 shrink, -1 shrink+warn, 0 zero-pad, 1 skip
+num_workers: 0                  # worker count; <=0 means auto-detect and use all available CPUs

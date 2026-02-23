@@ -1,31 +1,30 @@
-# Reconstruction command — defaults
-# Order: general → I/O → average → wedge
+# Reconstruction defaults: general -> input -> output -> averaging -> wedge
 
 # --- General ---
-pixel_size: 4.284
-tomogram_size: [2000, 2000, 800]
-log_level: info
+pixel_size: 4.284                 # Angstrom per pixel for origin conversion and filtering
+tomogram_size: [2000, 2000, 800]  # reference tomogram size [nx,ny,nz] when needed
+log_level: info                   # logging level: debug|info|warning|error
 
 # --- Input ---
-particles: null          # path to .tbl or .star
-subtomograms: null       # path to dir or star with rlnImageName
-vll: null
-tags: null               # optional: subset of tags to average
+particles: null                   # required: particle metadata path (.tbl or .star)
+subtomograms: null                # required: subtomogram directory or explicit input source
+vll: null                         # optional: Dynamo .vll for tbl workflows
+tags: null                        # optional: explicit subset of particle tags to average
 
 # --- Output ---
-output: output/average.mrc
+output: output/average.mrc        # required: output averaged volume path
 
-# --- Average ---
-sidelength: 64
-symmetry: c1             # c1, c2, c4, etc.
-fmask: null              # Fourier mask path
-nmask: null              # real-space mask path
+# --- Averaging ---
+sidelength: 64                    # required: subtomogram edge length in voxels
+symmetry: c1                      # point-group symmetry (c1,c2,c4,...)
+fmask: null                       # optional Fourier-space mask path
+nmask: null                       # optional real-space mask path
 
-# --- Wedge (Dynamo tbl cols 13-17) ---
-apply_wedge: false       # apply missing wedge when averaging
-wedge_ftype: 1           # 0=full, 1=single(Y), 2=singlex(X), 3=cone, 4=double
-wedge_ymin: -48          # Y tilt range min (deg)
-wedge_ymax: 48           # Y tilt range max (deg)
-wedge_xmin: -60          # X tilt range min (ftype 2/4)
-wedge_xmax: 60           # X tilt range max (ftype 2/4)
-fcompensate: false       # Fourier compensation: divide by wedge weight sum
+# --- Wedge (Dynamo table cols 13-17) ---
+apply_wedge: false                # true to apply missing wedge in reconstruction
+wedge_ftype: 1                    # wedge type: 0 full, 1 Y-single, 2 X-single, 3 cone, 4 double
+wedge_ymin: -48                   # Y-axis minimum tilt angle (degrees)
+wedge_ymax: 48                    # Y-axis maximum tilt angle (degrees)
+wedge_xmin: -60                   # X-axis minimum tilt angle (degrees; ftype 2/4)
+wedge_xmax: 60                    # X-axis maximum tilt angle (degrees; ftype 2/4)
+fcompensate: false                # true to divide by wedge weight sum in Fourier domain

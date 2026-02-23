@@ -1,27 +1,26 @@
-# Synthetic data generation — no missing wedge
-# Order: general → sampling → tomogram → wedge → output
+# Synthetic data defaults (no missing wedge): general -> template/output -> sampling -> tomogram -> wedge
 
 # --- General ---
-pixel_size: 4.284
-seed: 42
+pixel_size: 4.284                     # output voxel size in Angstrom
+seed: 42                              # random seed for reproducible sampling
 
 # --- Template & output ---
-template: ../synthetic_data/emd_32820_bin4.mrc
-output_root: ../synthetic_data
+template: ../synthetic_data/emd_32820_bin4.mrc  # input template volume path
+output_root: ../synthetic_data       # root directory for generated outputs
 
 # --- Sampling ---
-n_particles: 100         # use 1000 for full test
-n_noise: 50              # noise particles for classification set
-tomogram_size: [1000, 1000, 800]  # [nx, ny, nz]; use [2000,2000,800] for full
+n_particles: 100                      # number of real particles to embed (set 1000 for full run)
+n_noise: 50                           # number of noise-only particles for classification set
+tomogram_size: [1000, 1000, 800]      # tomogram size [nx,ny,nz] in voxels
 
 # --- Tomogram ---
-noise_sigma: 0.01        # Gaussian background std
-particle_scale_ratio: 3.0  # scale particle std to (ratio * noise_sigma) before embed
+noise_sigma: 0.01                     # Gaussian background noise standard deviation
+particle_scale_ratio: 3.0             # scale particle std to ratio*noise_sigma before embedding
 
-# --- Wedge (Dynamo tbl cols 13-17) ---
-apply_missing_wedge: false
-wedge_ftype: 1           # 0=full, 1=single(Y), 2=singlex, 3=cone, 4=double
-wedge_ymin: -48
-wedge_ymax: 48
-wedge_xmin: -60
-wedge_xmax: 60
+# --- Wedge ---
+apply_missing_wedge: false            # false means keep full Fourier coverage
+wedge_ftype: 1                        # wedge type: 0 full,1 Y-single,2 X-single,3 cone,4 double
+wedge_ymin: -48                       # Y-axis minimum tilt angle (degrees)
+wedge_ymax: 48                        # Y-axis maximum tilt angle (degrees)
+wedge_xmin: 0                         # X-axis minimum tilt angle (degrees; used by ftype 2/4)
+wedge_xmax: 0                         # X-axis maximum tilt angle (degrees; used by ftype 2/4)

@@ -1,26 +1,36 @@
-# Classification (MRA) on synthetic data (real + noise, 2 refs)
-# Order: general → input → output → iteration → alignment
+# Synthetic classification (MRA) example: general -> input -> output -> iteration -> alignment -> device
 
 # --- General ---
-pixel_size: 4.284
+pixel_size: 4.284                                                # Angstrom per pixel for conversion/filter
+log_level: info                                                  # logging level: debug|info|warning|error
 
 # --- Input ---
-particles: ../synthetic_data/out_tomograms4classification/particles.star
-subtomograms: ../synthetic_data/out_tomograms4classification
-references:
-  - ../synthetic_data/emd_32820_bin4.mrc
-  - ../synthetic_data/emd_32820_bin4.mrc
+particles: ../synthetic_data/out_tomograms4classification/particles.star  # particle metadata
+subtomograms: ../synthetic_data/out_tomograms4classification              # subtomogram directory
+references:                                                                # list of reference volumes
+  - ../synthetic_data/emd_32820_bin4.mrc                                  # reference #1
+  - ../synthetic_data/emd_32820_bin4.mrc                                  # reference #2
+tables: null                                                     # optional initial tables list per reference
+vll: null                                                        # optional vll path for tbl workflows
 
 # --- Output ---
-output_dir: ../synthetic_data/mra_output
+output_dir: ../synthetic_data/mra_output                         # output root directory
 
 # --- Iteration ---
-max_iterations: 2
-swap: true
+max_iterations: 2                                                # number of MRA iterations
+swap: true                                                       # true: each particle compares all references
+threshold: 0.0                                                   # optional CC threshold for averaging selection
 
-# --- Alignment (per iteration) ---
-cone_step: 30.0
-cone_range: [0, 180]
-inplane_step: 30.0
-inplane_range: [0, 360]
-lowpass: null
+# --- Alignment ---
+cone_step: 30.0                                                  # tilt search step (degrees)
+cone_range: [0, 180]                                             # tilt range [min,max] (degrees)
+inplane_step: 30.0                                               # inplane search step (degrees)
+inplane_range: [0, 360]                                          # inplane range [min,max] (degrees)
+shift_search: 3                                                  # translational search radius (voxels)
+multigrid_levels: 2                                              # coarse-to-fine levels
+lowpass: null                                                    # optional lowpass cutoff in Angstrom
+
+# --- Device ---
+device: auto                                                     # cpu|cuda|auto; auto uses all detected GPUs
+device_id: null                                                  # optional single GPU id override
+gpu_ids: null                                                    # optional explicit GPU id list; null means all detected GPUs

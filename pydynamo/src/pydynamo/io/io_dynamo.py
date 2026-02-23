@@ -136,6 +136,7 @@ def create_dynamo_table(
     angles_zxz = convert_euler(
         angles_zyz_arr, src_convention="relion", dst_convention="dynamo", degrees=True
     )
+    angles_zxz = np.atleast_2d(angles_zxz)
     tdrot, tilt, narot = angles_zxz[:, 0], angles_zxz[:, 1], angles_zxz[:, 2]
 
     if micrograph_names is None:
