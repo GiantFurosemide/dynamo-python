@@ -3,6 +3,8 @@
 # --- General ---
 pixel_size: 4.284                                      # Angstrom per pixel for filter/origin conversion
 log_level: info                                        # logging level: debug|info|warning|error
+log_file: alignment.log                                # log output file; relative path defaults to YAML directory
+error_log_file: alignment.error.log                    # error output file; relative path defaults to YAML directory
 
 # --- Input ---
 particles: ../synthetic_data/out_subtomograms/particles.star  # particle metadata input

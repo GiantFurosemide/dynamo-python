@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 def run(config_path: str, rest: list, args) -> int:
     """Run classification (MRA) command. Returns exit code."""
     config = _load_config(config_path, args)
-    configure_logging(args, config, __name__)
+    configure_logging(args, config, __name__, config_path=config_path)
 
     particles = config.get("particles")
     subtomograms = config.get("subtomograms")
@@ -43,7 +43,7 @@ def run(config_path: str, rest: list, args) -> int:
     gpu_ids = config.get("gpu_ids")
 
     if not all([particles, subtomograms, references, output_dir]):
-        _err("Missing required: particles, subtomograms, references, output_dir", args, config=config)
+        _err("Missing required: particles, subtomograms, references, output_dir", args, config=config, config_path=config_path)
         return 1
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -207,7 +207,7 @@ def _load_config(path: str, args=None) -> dict:
             return yaml.safe_load(f) or {}
     except FileNotFoundError:
         if args:
-            _err(f"Config file not found: {path}", args)
+            _err(f"Config file not found: {path}", args, config_path=path)
         raise
 
 
@@ -254,8 +254,8 @@ def _get_cuda_info():
     return cuda_ok, n_gpu
 
 
-def _err(msg: str, args, code: int = 1, config=None):
-    write_error(msg, args=args, config=config)
+def _err(msg: str, args, code: int = 1, config=None, config_path=None):
+    write_error(msg, args=args, config=config, config_path=config_path)
     if getattr(args, "json_errors", False):
         import json
         print(json.dumps({"error": msg, "code": code}), file=sys.stderr)

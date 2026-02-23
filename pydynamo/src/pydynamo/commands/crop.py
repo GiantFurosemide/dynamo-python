@@ -45,7 +45,7 @@ def run(config_path: str, rest: list, args) -> int:
     except FileNotFoundError as e:
         _err(str(e), args)
     config["log_level"] = getattr(args, "log_level", config.get("log_level", "info"))
-    configure_logging(args, config, __name__)
+    configure_logging(args, config, __name__, config_path=config_path)
 
     particles_in = config.get("particles")
     tomograms = config.get("tomograms")
@@ -58,11 +58,11 @@ def run(config_path: str, rest: list, args) -> int:
     tomogram_size = config.get("tomogram_size")
 
     if not particles_in or not sidelength or not output_star:
-        _err("Missing required: particles, sidelength, output_star", args, config=config)
+        _err("Missing required: particles, sidelength, output_star", args, config=config, config_path=config_path)
         return 1
 
     if sidelength <= 0 or sidelength % 2 != 0:
-        _err("sidelength must be positive and even", args, config=config)
+        _err("sidelength must be positive and even", args, config=config, config_path=config_path)
         return 1
 
     output_dir = Path(output_dir)
@@ -80,24 +80,24 @@ def run(config_path: str, rest: list, args) -> int:
                 x_col, y_col, z_col = "rlnCoordinateX", "rlnCoordinateY", "rlnCoordinateZ"
             elif "rlnCenteredCoordinateXAngst" in df.columns:
                 if not pixel_size or not tomogram_size:
-                    _err("star with rlnCenteredCoordinate requires pixel_size and tomogram_size", args, config=config)
+                    _err("star with rlnCenteredCoordinate requires pixel_size and tomogram_size", args, config=config, config_path=config_path)
                 ts = tuple(tomogram_size)
                 df = _star_centered_to_absolute(df, pixel_size, ts)
                 x_col, y_col, z_col = "x", "y", "z"
             else:
-                _err("Star file must have rlnCoordinateX/Y/Z or rlnCenteredCoordinateXAngst/Y/Z", args, config=config)
+                _err("Star file must have rlnCoordinateX/Y/Z or rlnCenteredCoordinateXAngst/Y/Z", args, config=config, config_path=config_path)
             tomo_col = "rlnMicrographName" if "rlnMicrographName" in df.columns else "rlnTomoName"
             if tomo_col not in df.columns:
-                _err(f"Star file must have {tomo_col}", args, config=config)
+                _err(f"Star file must have {tomo_col}", args, config=config, config_path=config_path)
         else:
             source_is_tbl = True
             if not vll_path and tomograms is None:
-                _err("tbl requires vll or tomograms for tomogram paths", args, config=config)
+                _err("tbl requires vll or tomograms for tomogram paths", args, config=config, config_path=config_path)
             df = read_dynamo_tbl(particles_in, vll_path=vll_path)
             x_col, y_col, z_col = "x", "y", "z"
             tomo_col = "rlnMicrographName" if "rlnMicrographName" in df.columns else "tomo"
     else:
-        _err("particles must be path to .tbl or .star", args, config=config)
+        _err("particles must be path to .tbl or .star", args, config=config, config_path=config_path)
 
     vll_df = None
     if vll_path:
@@ -154,7 +154,7 @@ def run(config_path: str, rest: list, args) -> int:
 
     out_df = pd.DataFrame(out_rows)
     if not out_rows:
-        _err("No particles were cropped", args, config=config)
+        _err("No particles were cropped", args, config=config, config_path=config_path)
         return 1
 
     # Write star
@@ -265,8 +265,8 @@ def _star_centered_to_absolute(df, pixel_size, tomogram_size):
 
 
 
-def _err(msg: str, args, code: int = 1, config=None):
-    write_error(msg, args=args, config=config)
+def _err(msg: str, args, code: int = 1, config=None, config_path=None):
+    write_error(msg, args=args, config=config, config_path=config_path)
     if getattr(args, "json_errors", False):
         import json
         print(json.dumps({"error": msg, "code": code}), file=sys.stderr)

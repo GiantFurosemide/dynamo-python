@@ -10,19 +10,45 @@ from typing import Iterable, Iterator, Optional, TypeVar
 T = TypeVar("T")
 
 
-def _resolve_log_path(args=None, config: Optional[dict] = None) -> Optional[str]:
-    """Resolve log path from CLI args/config."""
-    if args is not None and getattr(args, "log_file", None):
-        return str(getattr(args, "log_file"))
-    if config:
-        if config.get("error_log_file"):
-            return str(config.get("error_log_file"))
-        if config.get("log_file"):
-            return str(config.get("log_file"))
-    return None
+def _resolve_path(raw_path: Optional[str], config_path: Optional[str]) -> Optional[str]:
+    """Resolve raw path. Relative path is resolved against config file directory."""
+    if not raw_path:
+        return None
+    p = Path(str(raw_path))
+    if p.is_absolute() or not config_path:
+        return str(p)
+    return str((Path(config_path).resolve().parent / p).resolve())
 
 
-def configure_logging(args=None, config: Optional[dict] = None, logger_name: Optional[str] = None) -> logging.Logger:
+def _default_log_paths(config_path: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Default log/error file paths in same directory as config."""
+    if not config_path:
+        return None, None
+    cp = Path(config_path).resolve()
+    return (
+        str(cp.with_suffix(".log")),
+        str(cp.with_suffix(".error.log")),
+    )
+
+
+def resolve_log_paths(args=None, config: Optional[dict] = None, config_path: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
+    """
+    Resolve (log_path, error_log_path).
+    Priority:
+      1) explicit args/config
+      2) default path next to YAML config
+    """
+    default_log, default_err = _default_log_paths(config_path)
+    cfg_log = _resolve_path(config.get("log_file") if config else None, config_path)
+    cfg_err = _resolve_path(config.get("error_log_file") if config else None, config_path)
+    arg_log = _resolve_path(getattr(args, "log_file", None) if args is not None else None, config_path)
+
+    log_path = arg_log or cfg_log or default_log
+    err_path = cfg_err or default_err
+    return log_path, err_path
+
+
+def configure_logging(args=None, config: Optional[dict] = None, logger_name: Optional[str] = None, config_path: Optional[str] = None) -> logging.Logger:
     """Configure root logger (stdout + optional file)."""
     level_name = "info"
     if args is not None and getattr(args, "log_level", None):
@@ -39,7 +65,7 @@ def configure_logging(args=None, config: Optional[dict] = None, logger_name: Opt
     stream_handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
     root.addHandler(stream_handler)
 
-    log_path = _resolve_log_path(args=args, config=config)
+    log_path, _ = resolve_log_paths(args=args, config=config, config_path=config_path)
     if log_path:
         lp = Path(log_path)
         lp.parent.mkdir(parents=True, exist_ok=True)
@@ -51,9 +77,9 @@ def configure_logging(args=None, config: Optional[dict] = None, logger_name: Opt
     return logging.getLogger(logger_name) if logger_name else root
 
 
-def write_error(msg: str, args=None, config: Optional[dict] = None) -> None:
+def write_error(msg: str, args=None, config: Optional[dict] = None, config_path: Optional[str] = None) -> None:
     """Append error message to resolved error log file."""
-    path = _resolve_log_path(args=args, config=config)
+    _, path = resolve_log_paths(args=args, config=config, config_path=config_path)
     if not path:
         return
     p = Path(path)
@@ -63,27 +89,7 @@ def write_error(msg: str, args=None, config: Optional[dict] = None) -> None:
 
 
 def progress_iter(iterable: Iterable[T], total: Optional[int] = None, desc: str = "") -> Iterator[T]:
-    """Simple terminal progress bar without external deps."""
-    if total is None:
-        try:
-            total = len(iterable)  # type: ignore[arg-type]
-        except Exception:
-            total = 0
-
-    count = 0
-    width = 24
-    prefix = f"{desc} " if desc else ""
+    """Progress iterator (silent by default)."""
+    del total, desc
     for item in iterable:
-        count += 1
-        if total > 0:
-            frac = count / total
-            done = int(width * frac)
-            bar = "#" * done + "-" * (width - done)
-            sys.stderr.write(f"\r{prefix}[{bar}] {count}/{total}")
-        else:
-            sys.stderr.write(f"\r{prefix}{count}")
-        sys.stderr.flush()
         yield item
-    if count > 0:
-        sys.stderr.write("\n")
-        sys.stderr.flush()

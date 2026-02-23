@@ -183,7 +183,7 @@ def run(config_path=None, cli_args=None):
     if path and os.path.exists(path):
         with open(path) as f:
             cfg = yaml.safe_load(f) or {}
-    configure_logging(cli_args, cfg, __name__)
+    configure_logging(cli_args, cfg, __name__, config_path=config_path)
 
     template_path = str(cfg.get("template", "synthetic_data/emd_32820_bin4.mrc"))
     out_root = Path(cfg.get("output_root", "synthetic_data"))
@@ -232,7 +232,7 @@ def run(config_path=None, cli_args=None):
             _embed_with_debug(tomogram, part_rot, x_abs, y_abs, z_abs, tomogram_size, embed_count)
             embed_count += 1
     except Exception as e:
-        write_error(str(e), args=cli_args, config=cfg)
+        write_error(str(e), args=cli_args, config=cfg, config_path=config_path)
         raise
     logger.info("Built tomogram with Gaussian background (sigma=%.2f)", noise_sigma)
 

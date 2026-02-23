@@ -81,18 +81,23 @@
 
 - 新增通用运行时工具：`pydynamo/src/pydynamo/runtime.py`
   - `configure_logging()`：统一日志初始化（stdout + 可选文件）
-  - `progress_iter()`：统一终端进度条（无第三方依赖）
+  - `progress_iter()`：统一进度跟踪迭代器（默认静默，不输出进度条文本）
   - `write_error()`：统一错误追加写入日志文件
 - 接入命令：
-  - `crop`：串行/并行模式均显示进度条
-  - `reconstruction`：粒子累积阶段显示进度条
-  - `alignment`：单卡与多卡模式显示进度条
-  - `classification`：每轮迭代显示进度条
-  - `gen_synthetic`：embed/crop/classification 生成阶段显示进度条
+  - `crop`：串行/并行模式均接入进度跟踪
+  - `reconstruction`：粒子累积阶段接入进度跟踪
+  - `alignment`：单卡与多卡模式接入进度跟踪
+  - `classification`：每轮迭代接入进度跟踪
+  - `gen_synthetic`：embed/crop/classification 生成阶段接入进度跟踪
 - 错误日志输出策略：
   - 优先使用 CLI `--log-file`
-  - 否则读取 YAML `error_log_file` 或 `log_file`
+  - 否则读取 YAML `error_log_file` 与 `log_file`
+  - 未显式配置时默认输出到 YAML 同目录：
+    - `log_file`: `<config_name>.log`
+    - `error_log_file`: `<config_name>.error.log`
   - 保留 stderr 输出与 `--json-errors` 行为
+- YAML 显式化：
+  - `pydynamo/config/*.yaml` 全部加入 `log_file` 与 `error_log_file` 字段及注释
 
 ### 1.10 Reconstruction 输出 voxel_size 修复（按 YAML `pixel_size`）
 
@@ -129,6 +134,9 @@
   - 新增 `test_crop_tbl_outputs_relion_star`：验证 tbl 输入时输出为 RELION star 字段且不再含 `tdrot`
 - `pydynamo/test/test_reconstruction_command.py`
   - 增加 voxel_size 断言：输出 `average.mrc` 的 `voxel_size.x` 必须等于配置 `pixel_size`
+- `pydynamo/test/test_runtime.py`
+  - 验证日志默认路径落在 YAML 同目录
+  - 验证 YAML 相对路径按 YAML 目录解析
 - 说明：
   - 本次“进度条 + 错误日志”属于运行时增强，不改变算法输出；现有测试集全量回归验证通过
 
@@ -144,11 +152,11 @@
 
 结果：
 
-- Collected: **28**
-- Passed: **28**
+- Collected: **31**
+- Passed: **31**
 - Failed: **0**
 - Skipped: **0**
-- 总耗时: **~8.90s**
+- 总耗时: **~7.40s**
 
 关键结论：
 
@@ -159,6 +167,7 @@
 - 新增 crop tbl->star 格式修复测试通过（输出 RELION 字段）
 - 进度条与错误日志接入后全量回归通过，无回归失败
 - reconstruction 输出 voxel_size 与配置 pixel_size 一致性测试通过
+- 日志默认同目录与相对路径解析测试通过
 - command-level 与 synthetic 生成测试全部通过
 
 ---
@@ -177,6 +186,8 @@
    - [x] `alignment` / `classification` 默认 `device=auto` 使用全部可探测 GPU
    - [x] 全部命令具备进度条能力
    - [x] 全部命令支持错误日志文件输出
+   - [x] `log_file`/`error_log_file` 在 YAML 显式可配置
+   - [x] 未显式配置时日志默认输出到 YAML 同目录
    - [x] `reconstruction` 输出 MRC 的 `voxel_size` 等于 YAML `pixel_size`
 2. 测试完成
    - [x] 新增测试可被 pytest 发现

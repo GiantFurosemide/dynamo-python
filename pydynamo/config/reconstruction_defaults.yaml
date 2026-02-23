@@ -4,6 +4,8 @@
 pixel_size: 4.284                 # Angstrom per pixel for origin conversion and filtering
 tomogram_size: [2000, 2000, 800]  # reference tomogram size [nx,ny,nz] when needed
 log_level: info                   # logging level: debug|info|warning|error
+log_file: reconstruction.log      # log output file; relative path defaults to YAML directory
+error_log_file: reconstruction.error.log  # error output file; relative path defaults to YAML directory
 
 # --- Input ---
 particles: null                   # required: particle metadata path (.tbl or .star)

@@ -62,9 +62,11 @@
 ### T3.4 进度与错误日志（P0）
 
 - 命令范围：`crop`, `reconstruction`, `alignment`, `classification`, `gen_synthetic`
-- 每个命令在长循环中提供终端进度条
+- 每个命令具备进度跟踪能力，但默认不在终端打印进度条文本
 - 错误信息支持输出到文件（优先 `--log-file`，其次 YAML `error_log_file`/`log_file`）
 - 错误输出同时保留 stderr（含 `--json-errors` 行为）
+- YAML 中显式提供 `log_file` 与 `error_log_file`
+- 当 YAML 中未显式填写路径时，默认输出到与 YAML 同目录（`<config>.log` 与 `<config>.error.log`）
 
 ### T3.5 Reconstruction 输出 voxel_size 对齐配置（P0）
 
@@ -92,8 +94,9 @@
 - `commands/crop`:
   - `num_workers<=0` 自动解析为可用 CPU 数
 - `all commands`:
-  - 进度条可见且随任务推进更新
+  - 进度跟踪逻辑存在但默认静默（不输出进度条文本）
   - 触发错误时可在日志文件中看到错误记录
+  - 日志与错误日志路径可由 YAML 显式指定，且默认落在 YAML 同目录
 - `scripts/generate_synthetic`:
   - 小规模数据集输出完整性（tomogram/subtomogram/classification）
 - `reconstruction`:
@@ -123,6 +126,8 @@
    - [ ] `alignment` / `classification` 默认 `device=auto` 使用全部可探测 GPU
    - [ ] 全部命令具备进度条能力
    - [ ] 全部命令支持错误日志文件输出
+   - [ ] `log_file`/`error_log_file` 在 YAML 显式可配置
+   - [ ] 未显式配置时日志默认输出到 YAML 同目录
    - [ ] `reconstruction` 输出 MRC 的 `voxel_size` 等于 YAML `pixel_size`
 2. 测试完成：
    - [ ] 新增测试文件已加入仓库并可被 pytest 发现

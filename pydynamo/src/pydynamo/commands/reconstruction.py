@@ -34,7 +34,7 @@ def _resolve_particle_path(p_path, base_dir: Path, subtomograms) -> Path:
 def run(config_path: str, rest: list, args) -> int:
     """Run reconstruction command. Returns exit code."""
     config = _load_config(config_path, args)
-    configure_logging(args, config, __name__)
+    configure_logging(args, config, __name__, config_path=config_path)
 
     particles = config.get("particles")
     subtomograms = config.get("subtomograms")
@@ -52,7 +52,7 @@ def run(config_path: str, rest: list, args) -> int:
     fcompensate = config.get("fcompensate", False)
 
     if not all([particles, subtomograms, output, sidelength]):
-        _err("Missing required: particles, subtomograms, output, sidelength", args, config=config)
+        _err("Missing required: particles, subtomograms, output, sidelength", args, config=config, config_path=config_path)
         return 1
 
     output = Path(output)
@@ -115,7 +115,7 @@ def run(config_path: str, rest: list, args) -> int:
         elif isinstance(subtomograms, list):
             paths_list = subtomograms
         else:
-            _err("subtomograms must be path or list; or particles star must have rlnImageName", args, config=config)
+            _err("subtomograms must be path or list; or particles star must have rlnImageName", args, config=config, config_path=config_path)
 
     # Filter by tags / averaged
     if "averaged" in tbl_df.columns:
@@ -134,7 +134,7 @@ def run(config_path: str, rest: list, args) -> int:
 
     n = len(tbl_df)
     if n == 0:
-        _err("No particles to average", args, config=config)
+        _err("No particles to average", args, config=config, config_path=config_path)
         return 1
     if len(paths_list) < n:
         paths_list = (paths_list * (n // len(paths_list) + 1))[:n]
@@ -182,7 +182,7 @@ def run(config_path: str, rest: list, args) -> int:
             fft_sum += f
             n_acc += 1
         if n_acc == 0:
-            _err("No valid particles loaded", args, config=config)
+            _err("No valid particles loaded", args, config=config, config_path=config_path)
             return 1
         denom = wedge_mask * n_acc if fcompensate else (np.ones_like(wedge_mask) * n_acc)
         denom = np.maximum(denom, 1e-12)
@@ -207,7 +207,7 @@ def run(config_path: str, rest: list, args) -> int:
             )
             particles_data.append(tr)
         if not particles_data:
-            _err("No valid particles loaded", args, config=config)
+            _err("No valid particles loaded", args, config=config, config_path=config_path)
             return 1
         avg = sum(particles_data) / len(particles_data)
 
@@ -231,12 +231,12 @@ def _load_config(path: str, args=None) -> dict:
             return yaml.safe_load(f) or {}
     except FileNotFoundError:
         if args:
-            _err(f"Config file not found: {path}", args)
+            _err(f"Config file not found: {path}", args, config_path=path)
         raise
 
 
-def _err(msg: str, args, code: int = 1, config=None):
-    write_error(msg, args=args, config=config)
+def _err(msg: str, args, code: int = 1, config=None, config_path=None):
+    write_error(msg, args=args, config=config, config_path=config_path)
     if getattr(args, "json_errors", False):
         import json
         print(json.dumps({"error": msg, "code": code}), file=sys.stderr)

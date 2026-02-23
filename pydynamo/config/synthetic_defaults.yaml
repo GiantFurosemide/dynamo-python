@@ -3,6 +3,9 @@
 # --- General ---
 pixel_size: 4.284                     # output voxel size in Angstrom
 seed: 42                              # random seed for reproducible sampling
+log_level: info                       # logging level: debug|info|warning|error
+log_file: gen_synthetic.log           # log output file; relative path defaults to YAML directory
+error_log_file: gen_synthetic.error.log  # error output file; relative path defaults to YAML directory
 
 # --- Template & output ---
 template: ../synthetic_data/emd_32820_bin4.mrc  # input template volume path

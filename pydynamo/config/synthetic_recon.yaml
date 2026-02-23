@@ -4,6 +4,8 @@
 pixel_size: 4.284                                   # Angstrom per pixel used for origin conversion
 tomogram_size: [1000, 1000, 800]                    # reference tomogram size [nx,ny,nz]
 log_level: info                                     # logging level: debug|info|warning|error
+log_file: reconstruction.log                        # log output file; relative path defaults to YAML directory
+error_log_file: reconstruction.error.log            # error output file; relative path defaults to YAML directory
 
 # --- Input ---
 particles: ../synthetic_data/out_subtomograms/particles.star  # particle metadata input
