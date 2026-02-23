@@ -4,6 +4,7 @@ src/pydynamo/__init__.py
 src/pydynamo/__main__.py
 src/pydynamo/cli.py
 src/pydynamo/config_loader.py
+src/pydynamo/runtime.py
 src/pydynamo.egg-info/PKG-INFO
 src/pydynamo.egg-info/SOURCES.txt
 src/pydynamo.egg-info/dependency_links.txt
@@ -26,6 +27,10 @@ src/pydynamo/io/io_eular.py
 src/pydynamo/scripts/__init__.py
 src/pydynamo/scripts/generate_synthetic.py
 test/test_align.py
+test/test_alignment_command.py
 test/test_average.py
+test/test_classification.py
 test/test_cli.py
 test/test_crop.py
+test/test_generate_synthetic.py
+test/test_reconstruction_command.py

@@ -12,14 +12,29 @@ import yaml
 from ..core.average import apply_inverse_transform, apply_symmetry
 from ..core.wedge import get_wedge_mask
 from ..io import read_dynamo_tbl
+from ..runtime import configure_logging, progress_iter, write_error
 
 logger = logging.getLogger(__name__)
 
 
+def _resolve_particle_path(p_path, base_dir: Path, subtomograms) -> Path:
+    """Resolve particle path with priority: absolute -> subtomograms dir -> particles dir."""
+    p = Path(p_path)
+    if p.is_absolute():
+        return p
+    if isinstance(subtomograms, str):
+        sub_dir = Path(subtomograms)
+        if sub_dir.is_dir():
+            cand = sub_dir / p
+            if cand.exists():
+                return cand
+    return base_dir / p
+
+
 def run(config_path: str, rest: list, args) -> int:
     """Run reconstruction command. Returns exit code."""
-    logging.basicConfig(level=getattr(logging, args.log_level.upper()))
     config = _load_config(config_path, args)
+    configure_logging(args, config, __name__)
 
     particles = config.get("particles")
     subtomograms = config.get("subtomograms")
@@ -37,7 +52,7 @@ def run(config_path: str, rest: list, args) -> int:
     fcompensate = config.get("fcompensate", False)
 
     if not all([particles, subtomograms, output, sidelength]):
-        _err("Missing required: particles, subtomograms, output, sidelength", args)
+        _err("Missing required: particles, subtomograms, output, sidelength", args, config=config)
         return 1
 
     output = Path(output)
@@ -56,7 +71,7 @@ def run(config_path: str, rest: list, args) -> int:
                 from ..io import convert_euler
                 ang_zyz = tbl_df[["rlnAngleRot", "rlnAngleTilt", "rlnAnglePsi"]].values
                 ang_zxz = convert_euler(ang_zyz, src_convention="relion", dst_convention="dynamo", degrees=True)
-                angles = ang_zxz
+                angles = np.atleast_2d(ang_zxz)
             elif "tdrot" in tbl_df.columns:
                 angles = np.column_stack([
                     tbl_df["tdrot"].values, tbl_df["tilt"].values, tbl_df["narot"].values
@@ -100,7 +115,7 @@ def run(config_path: str, rest: list, args) -> int:
         elif isinstance(subtomograms, list):
             paths_list = subtomograms
         else:
-            _err("subtomograms must be path or list; or particles star must have rlnImageName", args)
+            _err("subtomograms must be path or list; or particles star must have rlnImageName", args, config=config)
 
     # Filter by tags / averaged
     if "averaged" in tbl_df.columns:
@@ -119,7 +134,7 @@ def run(config_path: str, rest: list, args) -> int:
 
     n = len(tbl_df)
     if n == 0:
-        _err("No particles to average", args)
+        _err("No particles to average", args, config=config)
         return 1
     if len(paths_list) < n:
         paths_list = (paths_list * (n // len(paths_list) + 1))[:n]
@@ -146,10 +161,8 @@ def run(config_path: str, rest: list, args) -> int:
         from scipy.fft import fftn, ifftn
         n_acc = 0
         fft_sum = np.zeros((sidelength, sidelength, sidelength), dtype=np.complex128)
-        for i, p_path in enumerate(paths_list):
-            full_path = Path(p_path)
-            if not full_path.is_absolute():
-                full_path = base_dir / p_path
+        for i, p_path in progress_iter(list(enumerate(paths_list)), total=len(paths_list), desc="recon"):
+            full_path = _resolve_particle_path(p_path, base_dir, subtomograms)
             try:
                 with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
                     vol = mrc.data.copy()
@@ -169,17 +182,15 @@ def run(config_path: str, rest: list, args) -> int:
             fft_sum += f
             n_acc += 1
         if n_acc == 0:
-            _err("No valid particles loaded", args)
+            _err("No valid particles loaded", args, config=config)
             return 1
         denom = wedge_mask * n_acc if fcompensate else (np.ones_like(wedge_mask) * n_acc)
         denom = np.maximum(denom, 1e-12)
         avg = np.real(ifftn(np.fft.ifftshift(fft_sum / denom))).astype(np.float32)
     else:
         particles_data = []
-        for i, p_path in enumerate(paths_list):
-            full_path = Path(p_path)
-            if not full_path.is_absolute():
-                full_path = base_dir / p_path
+        for i, p_path in progress_iter(list(enumerate(paths_list)), total=len(paths_list), desc="recon"):
+            full_path = _resolve_particle_path(p_path, base_dir, subtomograms)
             try:
                 with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
                     vol = mrc.data.copy()
@@ -196,7 +207,7 @@ def run(config_path: str, rest: list, args) -> int:
             )
             particles_data.append(tr)
         if not particles_data:
-            _err("No valid particles loaded", args)
+            _err("No valid particles loaded", args, config=config)
             return 1
         avg = sum(particles_data) / len(particles_data)
 
@@ -204,6 +215,10 @@ def run(config_path: str, rest: list, args) -> int:
 
     with mrcfile.new(str(output), overwrite=True) as mrc:
         mrc.set_data(avg.astype(np.float32))
+        try:
+            mrc.voxel_size = float(pixel_size)
+        except Exception:
+            logger.warning("Failed to set output voxel_size from pixel_size=%s", pixel_size)
 
     n_avg = n_acc if wedge_mask is not None else len(particles_data)
     logger.info("Averaged %d particles to %s", n_avg, output)
@@ -220,7 +235,8 @@ def _load_config(path: str, args=None) -> dict:
         raise
 
 
-def _err(msg: str, args, code: int = 1):
+def _err(msg: str, args, code: int = 1, config=None):
+    write_error(msg, args=args, config=config)
     if getattr(args, "json_errors", False):
         import json
         print(json.dumps({"error": msg, "code": code}), file=sys.stderr)

@@ -14,6 +14,7 @@
 5. 实现多 GPU 并行调度（任务切分到多个 device）
 6. 默认并行策略收敛：crop 自动用全部 CPU；alignment/classification 自动用全部可探测 GPU
 7. 更新全部 `pydynamo/config/*.yaml`：显式展示并行相关设定，且每个变量均附注释
+8. 为全部命令增加进度条与错误日志文件输出能力
 
 ---
 
@@ -58,6 +59,18 @@
 - 每个变量必须有注释（含含义、单位或取值范围）
 - 并行相关变量显式出现：`num_workers`, `device`, `device_id`, `gpu_ids`
 
+### T3.4 进度与错误日志（P0）
+
+- 命令范围：`crop`, `reconstruction`, `alignment`, `classification`, `gen_synthetic`
+- 每个命令在长循环中提供终端进度条
+- 错误信息支持输出到文件（优先 `--log-file`，其次 YAML `error_log_file`/`log_file`）
+- 错误输出同时保留 stderr（含 `--json-errors` 行为）
+
+### T3.5 Reconstruction 输出 voxel_size 对齐配置（P0）
+
+- `reconstruction` 输出 MRC 的 `voxel_size` 必须显式写为 YAML `pixel_size`
+- 不允许依赖输入文件继承或默认值，避免下游尺度不一致
+
 ### T4. 测试补全（P0）
 
 新增/补强测试，覆盖：
@@ -78,8 +91,13 @@
   - 多 GPU 任务分发（可通过 mock 验证 device_id 分配）
 - `commands/crop`:
   - `num_workers<=0` 自动解析为可用 CPU 数
+- `all commands`:
+  - 进度条可见且随任务推进更新
+  - 触发错误时可在日志文件中看到错误记录
 - `scripts/generate_synthetic`:
   - 小规模数据集输出完整性（tomogram/subtomogram/classification）
+- `reconstruction`:
+  - 输出 `average.mrc` 的 `voxel_size` 与配置 `pixel_size` 一致
 
 ### T5. 执行与报告（P0）
 
@@ -103,12 +121,16 @@
    - [ ] `alignment` / `classification` 支持多 GPU 并行任务切分
    - [ ] `crop` 默认 `num_workers<=0` 自动使用全部 CPU
    - [ ] `alignment` / `classification` 默认 `device=auto` 使用全部可探测 GPU
+   - [ ] 全部命令具备进度条能力
+   - [ ] 全部命令支持错误日志文件输出
+   - [ ] `reconstruction` 输出 MRC 的 `voxel_size` 等于 YAML `pixel_size`
 2. 测试完成：
    - [ ] 新增测试文件已加入仓库并可被 pytest 发现
    - [ ] 在 `pydynamo` 环境执行全量测试一次（非 dry-run）
    - [ ] CPU 相关测试全部通过
    - [ ] 若 CUDA 可用，则 GPU 测试执行并通过；若不可用，需明确 skip 证据
    - [ ] 多 GPU 分发逻辑由测试验证（可使用 mock）
+   - [ ] 进度与错误日志改动不破坏现有测试（全量通过）
 3. 交付文档完成：
    - [ ] `response_005.md` 包含改动清单与测试报告
    - [ ] 报告中给出剩余风险与后续建议（如有）

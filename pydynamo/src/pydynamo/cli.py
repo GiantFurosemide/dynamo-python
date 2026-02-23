@@ -9,6 +9,8 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 import argparse
 import sys
 
+from .runtime import write_error
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -29,6 +31,7 @@ def main():
     config_path = args.config
     cmd = args.command
     if cmd != "gen_synthetic" and not config_path:
+        write_error(f"--i <config.yaml> is required for {cmd}", args=args)
         print("Error: --i <config.yaml> is required for " + cmd, file=sys.stderr)
         sys.exit(1)
 
@@ -51,6 +54,7 @@ def main():
             gen_run(config_path=config_path, cli_args=args)
             return 0
         except Exception as e:
+            write_error(str(e), args=args)
             print(f"Error: {e}", file=sys.stderr)
             return 1
     else:

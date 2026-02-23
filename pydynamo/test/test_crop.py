@@ -1,6 +1,7 @@
 """Tests for pydynamo crop."""
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import mrcfile
 import numpy as np
@@ -8,6 +9,7 @@ import pandas as pd
 import starfile
 import pytest
 
+from pydynamo.commands import crop as crop_cmd
 from pydynamo.core.crop import crop_volume, load_tomogram, save_subtomo
 from pydynamo.commands.crop import _resolve_num_workers
 from pydynamo.io import read_dynamo_tbl, read_vll_to_df, create_dynamo_table
@@ -78,3 +80,51 @@ def test_resolve_num_workers_auto():
     """num_workers<=0 resolves to all detected CPUs."""
     assert _resolve_num_workers(0) >= 1
     assert _resolve_num_workers(-1) >= 1
+
+
+def test_crop_tbl_outputs_relion_star(tmp_path: Path):
+    """tbl input should produce RELION-style STAR fields, not raw Dynamo columns."""
+    tomo = np.random.randn(32, 32, 32).astype(np.float32)
+    tomo_path = tmp_path / "tomo1.mrc"
+    with mrcfile.new(str(tomo_path), overwrite=True) as mrc:
+        mrc.set_data(tomo)
+
+    vll_path = tmp_path / "tomograms.vll"
+    vll_path.write_text(str(tomo_path) + "\n", encoding="utf-8")
+
+    tbl_path = tmp_path / "particles.tbl"
+    create_dynamo_table(
+        np.array([[16.0, 16.0, 16.0]]),
+        output_file=str(tbl_path),
+        micrograph_names=["tomo1"],
+    )
+
+    output_star = tmp_path / "particles.star"
+    cfg_path = tmp_path / "crop.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                f"particles: {tbl_path}",
+                f"vll: {vll_path}",
+                "tomograms: null",
+                f"output_star: {output_star}",
+                f"output_dir: {tmp_path / 'out'}",
+                "sidelength: 8",
+                "fill: 0",
+                "num_workers: 1",
+                "pixel_size: 4.0",
+                "tomogram_size: [32, 32, 32]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    args = SimpleNamespace(log_level="info", json_errors=False)
+    rc = crop_cmd.run(str(cfg_path), [], args)
+    assert rc == 0
+
+    df = starfile.read(str(output_star), always_dict=False)
+    assert "rlnImageName" in df.columns
+    assert "rlnAngleRot" in df.columns
+    assert "rlnCenteredCoordinateXAngst" in df.columns
+    assert "tdrot" not in df.columns

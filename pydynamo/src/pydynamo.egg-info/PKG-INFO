@@ -24,6 +24,8 @@ Python CLI for Dynamo subtomogram averaging: crop, reconstruction, alignment, cl
 ## Install
 
 ```bash
+conda create --name pydynamo python=3.12
+conda activate pydynamo
 cd pydynamo && pip install -e .
 ```
 
@@ -49,6 +51,34 @@ OMP_NUM_THREADS=1 pydynamo gen_synthetic --i config/synthetic_defaults.yaml
 pydynamo crop --i config/synthetic_crop.yaml
 pydynamo reconstruction --i config/synthetic_recon.yaml
 ```
+
+## Default parallel policy
+
+`pydynamo` uses conservative auto-parallel defaults so a single config file is enough for most runs:
+
+- `crop`:
+  - `num_workers <= 0` means auto-detect and use all available CPUs.
+- `alignment` and `classification`:
+  - `device: auto` means use CUDA when available, otherwise CPU.
+  - when CUDA is available, auto mode uses all detected GPUs by default.
+  - tasks are distributed across GPUs (round-robin by particle index).
+
+## YAML fields (parallel + device)
+
+These fields are explicitly available in config files under `config/*.yaml`:
+
+| Field | Commands | Type | Meaning |
+|------|----------|------|---------|
+| `num_workers` | `crop` | int | Number of CPU workers. `<=0` => all detected CPUs. |
+| `device` | `alignment`, `classification` | string | `cpu`, `cuda`, or `auto`. `auto` prefers CUDA and falls back to CPU. |
+| `device_id` | `alignment`, `classification` | int/null | Optional single GPU override. Example: `0`. |
+| `gpu_ids` | `alignment`, `classification` | list/null | Optional explicit GPU list. Example: `[0, 1]`. `null` => all detected GPUs. |
+
+Notes:
+
+- `device_id` and `gpu_ids` override default GPU selection behavior.
+- If CUDA is requested but not available, execution falls back to CPU with a warning.
+- For reproducible benchmarking, prefer explicit `gpu_ids` and fixed angular search settings.
 
 ## Troubleshooting
 

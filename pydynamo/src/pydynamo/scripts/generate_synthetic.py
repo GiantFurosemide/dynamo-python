@@ -19,6 +19,8 @@ import pandas as pd
 import starfile
 import yaml
 
+from ..runtime import configure_logging, progress_iter, write_error
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -181,6 +183,7 @@ def run(config_path=None, cli_args=None):
     if path and os.path.exists(path):
         with open(path) as f:
             cfg = yaml.safe_load(f) or {}
+    configure_logging(cli_args, cfg, __name__)
 
     template_path = str(cfg.get("template", "synthetic_data/emd_32820_bin4.mrc"))
     out_root = Path(cfg.get("output_root", "synthetic_data"))
@@ -210,23 +213,27 @@ def run(config_path=None, cli_args=None):
     nx, ny, nz = tomogram_size
     tomogram = np.random.randn(nz, ny, nx).astype(np.float32) * noise_sigma
     embed_count = 0
-    for row in sample_rows:
-        x_abs, y_abs, z_abs = star_to_absolute_pixels(row, pixel_size, tomogram_size)
-        R = euler_zyz_to_rotation_matrix(
-            row["rlnAngleRot"], row["rlnAngleTilt"], row["rlnAnglePsi"]
-        )
-        part_rot = rotate_volume(template, R)
-        if wedge_params:
-            from ..core.wedge import apply_wedge
-            part_rot = apply_wedge(part_rot, ftype=wedge_params[0], ymintilt=wedge_params[1],
-                                  ymaxtilt=wedge_params[2], xmintilt=wedge_params[3], xmaxtilt=wedge_params[4])
-        # scale particle std to (particle_scale_ratio * noise_sigma)
-        pstd = float(np.std(part_rot)) + 1e-12
-        target_std = particle_scale_ratio * noise_sigma
-        part_rot = part_rot * (target_std / pstd)
-        # embed uses 0-based; star_to_absolute_pixels gives 0-based
-        _embed_with_debug(tomogram, part_rot, x_abs, y_abs, z_abs, tomogram_size, embed_count)
-        embed_count += 1
+    try:
+        for row in progress_iter(sample_rows, total=len(sample_rows), desc="gen embed"):
+            x_abs, y_abs, z_abs = star_to_absolute_pixels(row, pixel_size, tomogram_size)
+            R = euler_zyz_to_rotation_matrix(
+                row["rlnAngleRot"], row["rlnAngleTilt"], row["rlnAnglePsi"]
+            )
+            part_rot = rotate_volume(template, R)
+            if wedge_params:
+                from ..core.wedge import apply_wedge
+                part_rot = apply_wedge(part_rot, ftype=wedge_params[0], ymintilt=wedge_params[1],
+                                      ymaxtilt=wedge_params[2], xmintilt=wedge_params[3], xmaxtilt=wedge_params[4])
+            # scale particle std to (particle_scale_ratio * noise_sigma)
+            pstd = float(np.std(part_rot)) + 1e-12
+            target_std = particle_scale_ratio * noise_sigma
+            part_rot = part_rot * (target_std / pstd)
+            # embed uses 0-based; star_to_absolute_pixels gives 0-based
+            _embed_with_debug(tomogram, part_rot, x_abs, y_abs, z_abs, tomogram_size, embed_count)
+            embed_count += 1
+    except Exception as e:
+        write_error(str(e), args=cli_args, config=cfg)
+        raise
     logger.info("Built tomogram with Gaussian background (sigma=%.2f)", noise_sigma)
 
     # ---------- 3. Save tomogram, tbl, vll, star ----------
@@ -261,7 +268,7 @@ def run(config_path=None, cli_args=None):
     except ImportError:
         from pydynamo.core.crop import crop_volume, save_subtomo
 
-    for i, row in enumerate(sample_rows):
+    for i, row in progress_iter(list(enumerate(sample_rows)), total=len(sample_rows), desc="gen crop"):
         x_abs, y_abs, z_abs = star_to_absolute_pixels(row, pixel_size, tomogram_size)
         # crop_volume uses 1-based position; our star gives 0-based -> add 1
         pos = (z_abs + 1, y_abs + 1, x_abs + 1)
@@ -281,7 +288,7 @@ def run(config_path=None, cli_args=None):
     if noise_scale <= 0:
         noise_scale = 1.0
     all_star_rows = []
-    for i, row in enumerate(sample_rows):
+    for i, row in progress_iter(list(enumerate(sample_rows)), total=len(sample_rows), desc="gen class-real"):
         src = out_sub / f"particle_{i+1:06d}.mrc"
         dst = out_4cl / f"particle_{i+1:06d}.mrc"
         if src.exists():
@@ -293,7 +300,7 @@ def run(config_path=None, cli_args=None):
         from ..core.crop import save_subtomo
     except ImportError:
         from pydynamo.core.crop import save_subtomo
-    for i in range(n_noise):
+    for i in progress_iter(range(n_noise), total=n_noise, desc="gen class-noise"):
         noise = np.random.randn(L, L, L).astype(np.float32) * noise_scale
         save_subtomo(noise, str(out_4cl / f"noise_{i+1:06d}.mrc"))
         r = sample_rows[i % n_particles].copy()

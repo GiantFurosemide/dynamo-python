@@ -225,6 +225,7 @@ def dynamo_df_to_relion(
     angles_zyz = convert_euler(
         angles_zxz, src_convention="dynamo", dst_convention="relion", degrees=True
     )
+    angles_zyz = np.atleast_2d(angles_zyz)
 
     dx = df["dx"] if "dx" in df.columns else df[COLUMNS_NAME.get(4, "dx")]
     dy = df["dy"] if "dy" in df.columns else df[COLUMNS_NAME.get(5, "dy")]

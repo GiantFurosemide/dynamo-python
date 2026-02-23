@@ -13,14 +13,15 @@ import yaml
 from ..core.align import align_one_particle
 from ..core.average import apply_inverse_transform, apply_symmetry
 from ..io import create_dynamo_table, convert_euler, read_dynamo_tbl
+from ..runtime import configure_logging, progress_iter, write_error
 
 logger = logging.getLogger(__name__)
 
 
 def run(config_path: str, rest: list, args) -> int:
     """Run classification (MRA) command. Returns exit code."""
-    logging.basicConfig(level=getattr(logging, args.log_level.upper()))
     config = _load_config(config_path, args)
+    configure_logging(args, config, __name__)
 
     particles = config.get("particles")
     subtomograms = config.get("subtomograms")
@@ -42,7 +43,7 @@ def run(config_path: str, rest: list, args) -> int:
     gpu_ids = config.get("gpu_ids")
 
     if not all([particles, subtomograms, references, output_dir]):
-        _err("Missing required: particles, subtomograms, references, output_dir", args)
+        _err("Missing required: particles, subtomograms, references, output_dir", args, config=config)
         return 1
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -132,14 +133,14 @@ def run(config_path: str, rest: list, args) -> int:
             logger.info("Classification multi-GPU scheduling on devices: %s", gpu_ids)
             with ThreadPoolExecutor(max_workers=len(gpu_ids)) as ex:
                 futures = [ex.submit(_align_particle_task, pidx, p_path) for pidx, p_path in enumerate(paths)]
-                for f in as_completed(futures):
+                for f in progress_iter(as_completed(futures), total=len(futures), desc=f"classify ite{ite+1}"):
                     best_ref, best_row = f.result()
                     if best_row is not None:
                         best_row["ref"] = best_ref + 1
                         best_row["grep_average"] = 1
                         refined_per_ref[best_ref].append(best_row)
         else:
-            for pidx, p_path in enumerate(paths):
+            for pidx, p_path in progress_iter(list(enumerate(paths)), total=len(paths), desc=f"classify ite{ite+1}"):
                 best_ref, best_row = _align_particle_task(pidx, p_path)
                 if best_row is not None:
                     best_row["ref"] = best_ref + 1
@@ -253,7 +254,8 @@ def _get_cuda_info():
     return cuda_ok, n_gpu
 
 
-def _err(msg: str, args, code: int = 1):
+def _err(msg: str, args, code: int = 1, config=None):
+    write_error(msg, args=args, config=config)
     if getattr(args, "json_errors", False):
         import json
         print(json.dumps({"error": msg, "code": code}), file=sys.stderr)
