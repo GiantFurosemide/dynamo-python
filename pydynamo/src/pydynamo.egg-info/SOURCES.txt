@@ -25,6 +25,7 @@ src/pydynamo/io/__init__.py
 src/pydynamo/io/io_dynamo.py
 src/pydynamo/io/io_eular.py
 src/pydynamo/scripts/__init__.py
+src/pydynamo/scripts/benchmark_profiles.py
 src/pydynamo/scripts/generate_synthetic.py
 test/test_align.py
 test/test_alignment_command.py
@@ -34,3 +35,4 @@ test/test_cli.py
 test/test_crop.py
 test/test_generate_synthetic.py
 test/test_reconstruction_command.py
+test/test_runtime.py

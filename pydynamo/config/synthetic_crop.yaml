@@ -20,3 +20,4 @@ output_dir: ../synthetic_data/out_subtomograms                  # output subtomo
 sidelength: 64                                      # cropped cube edge length in voxels
 fill: -1                                            # boundary policy: -2 shrink, -1 shrink+warn, 0 zero-pad, 1 skip
 num_workers: 0                                      # worker count; <=0 means auto-use all detected CPUs
+progress_log_every: 10                              # write progress log every N particles

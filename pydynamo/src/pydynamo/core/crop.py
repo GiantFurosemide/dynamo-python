@@ -93,10 +93,10 @@ def crop_volume(
     return subvolume, report
 
 
-def load_tomogram(path: str) -> np.ndarray:
-    """Load MRC/MRCS tomogram."""
+def load_tomogram(path: str, copy: bool = False) -> np.ndarray:
+    """Load MRC/MRCS tomogram. copy=False prefers mmap-backed array."""
     with mrcfile.open(path, mode="r", permissive=True) as mrc:
-        return mrc.data.copy()
+        return mrc.data.copy() if copy else np.asarray(mrc.data)
 
 
 def save_subtomo(data: np.ndarray, path: str) -> None:

@@ -2,29 +2,28 @@
 import logging
 import os
 import sys
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import time
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+import mrcfile
 import pandas as pd
 import starfile
 import yaml
 
 from ..config_loader import load_config
-from ..core.crop import crop_volume, load_tomogram, save_subtomo
+from ..core.crop import crop_volume, save_subtomo
 from ..io import read_dynamo_tbl, read_vll_to_df, dynamo_df_to_relion
-from ..runtime import configure_logging, progress_iter, write_error
+from ..runtime import configure_logging, log_command_inputs, progress_iter, progress_timing_text, write_error
 
 logger = logging.getLogger(__name__)
 
 
-def _crop_one(tomo_path, x, y, z, sidelength, fill, output_dir, tag, row_dict):
-    """Worker: load tomo, crop, save. Returns (out_row, True) or (None, False)."""
-    try:
-        vol = load_tomogram(tomo_path)
-    except Exception:
-        return None, False
+def _crop_one_with_volume(vol, x, y, z, sidelength, fill, output_dir, tag, row_dict):
+    """Crop one particle using already-loaded tomogram volume."""
     position = (z, y, x)
-    subtomo, report = crop_volume(vol, sidelength, position, fill=fill)
+    subtomo, _ = crop_volume(vol, sidelength, position, fill=fill)
     if subtomo is None:
         return None, False
     out_path = Path(output_dir) / f"particle_{tag:06d}.mrc"
@@ -38,6 +37,82 @@ def _crop_one(tomo_path, x, y, z, sidelength, fill, output_dir, tag, row_dict):
     return out_row, True
 
 
+def _process_tomo_group(tomo_path, group_tasks, num_workers: int, progress_log_every: int):
+    """
+    Process all particles for a single tomogram.
+    Loads tomogram once (mmap view), then crops group tasks.
+    """
+    out_rows = []
+    processed = 0
+    failed = 0
+    total = len(group_tasks)
+    progress_start = time.time()
+    try:
+        with mrcfile.open(str(tomo_path), mode="r", permissive=True) as mrc:
+            vol = mrc.data  # mmap-like view: avoid full copy for each task
+            if num_workers > 1 and total > 1:
+                with ThreadPoolExecutor(max_workers=min(num_workers, total)) as ex:
+                    futures = {
+                        ex.submit(
+                            _crop_one_with_volume,
+                            vol,
+                            t["x"],
+                            t["y"],
+                            t["z"],
+                            t["sidelength"],
+                            t["fill"],
+                            t["output_dir"],
+                            t["tag"],
+                            t["row_dict"],
+                        ): t
+                        for t in group_tasks
+                    }
+                    for f in progress_iter(as_completed(futures), total=len(futures), desc="crop"):
+                        processed += 1
+                        try:
+                            out_row, ok = f.result()
+                            if ok:
+                                out_rows.append(out_row)
+                            else:
+                                failed += 1
+                        except Exception:
+                            failed += 1
+                        if processed % progress_log_every == 0 or processed == total:
+                            logger.info(
+                                "Crop progress %d/%d (success=%d failed=%d, %s)",
+                                processed, total, len(out_rows), failed,
+                                progress_timing_text(progress_start, processed, total),
+                            )
+            else:
+                for t in progress_iter(group_tasks, total=len(group_tasks), desc="crop"):
+                    processed += 1
+                    out_row, ok = _crop_one_with_volume(
+                        vol,
+                        t["x"],
+                        t["y"],
+                        t["z"],
+                        t["sidelength"],
+                        t["fill"],
+                        t["output_dir"],
+                        t["tag"],
+                        t["row_dict"],
+                    )
+                    if ok:
+                        out_rows.append(out_row)
+                    else:
+                        failed += 1
+                    if processed % progress_log_every == 0 or processed == total:
+                        logger.info(
+                            "Crop progress %d/%d (success=%d failed=%d, %s)",
+                            processed, total, len(out_rows), failed,
+                            progress_timing_text(progress_start, processed, total),
+                        )
+    except Exception as e:
+        logger.warning("Failed loading tomogram %s: %s", tomo_path, e)
+        failed = total
+    return out_rows, processed, failed
+
+
 def run(config_path: str, rest: list, args) -> int:
     """Run crop command. Returns exit code."""
     try:
@@ -46,6 +121,7 @@ def run(config_path: str, rest: list, args) -> int:
         _err(str(e), args)
     config["log_level"] = getattr(args, "log_level", config.get("log_level", "info"))
     configure_logging(args, config, __name__, config_path=config_path)
+    log_command_inputs(logger, "crop", config=config, config_path=config_path, args=args, rest=rest)
 
     particles_in = config.get("particles")
     tomograms = config.get("tomograms")
@@ -56,6 +132,7 @@ def run(config_path: str, rest: list, args) -> int:
     fill = int(config.get("fill", -1))
     pixel_size = config.get("pixel_size")
     tomogram_size = config.get("tomogram_size")
+    progress_log_every = max(1, int(config.get("progress_log_every", 10)))
 
     if not particles_in or not sidelength or not output_star:
         _err("Missing required: particles, sidelength, output_star", args, config=config, config_path=config_path)
@@ -110,7 +187,7 @@ def run(config_path: str, rest: list, args) -> int:
     if "rlnImageName" not in df.columns:
         df["rlnImageName"] = None
 
-    # Build task list: (tomo_path, x, y, z, tag, row_dict)
+    # Build task list
     tasks = []
     for idx, row in df.iterrows():
         tag = int(row.get("tag", idx + 1))
@@ -132,25 +209,87 @@ def run(config_path: str, rest: list, args) -> int:
             continue
         row_dict = row.to_dict()
         row_dict[tomo_col] = tomo_key
-        tasks.append((tomo_path, x, y, z, sidelength, fill, str(output_dir), tag, row_dict))
+        tasks.append(
+            {
+                "tomo_path": str(tomo_path),
+                "x": x,
+                "y": y,
+                "z": z,
+                "sidelength": sidelength,
+                "fill": fill,
+                "output_dir": str(output_dir),
+                "tag": tag,
+                "row_dict": row_dict,
+            }
+        )
 
     out_rows = []
-    if num_workers <= 1:
-        for t in progress_iter(tasks, total=len(tasks), desc="crop"):
-            tomo_path, x, y, z, sl, fl, od, tag, rd = t
-            out_row, ok = _crop_one(tomo_path, x, y, z, sl, fl, od, tag, rd)
-            if ok:
-                out_rows.append(out_row)
+    total_tasks = len(tasks)
+    processed = 0
+    failed = 0
+    run_progress_start = time.time()
+
+    # Group by tomogram so each tomogram is loaded once.
+    grouped = defaultdict(list)
+    for t in tasks:
+        grouped[t["tomo_path"]].append(t)
+
+    tomo_groups = list(grouped.items())
+    if len(tomo_groups) == 1:
+        # Single tomogram: thread parallelism shares one loaded volume.
+        rows, p, f = _process_tomo_group(
+            tomo_groups[0][0],
+            tomo_groups[0][1],
+            num_workers=num_workers,
+            progress_log_every=progress_log_every,
+        )
+        out_rows.extend(rows)
+        processed += p
+        failed += f
     else:
-        with ProcessPoolExecutor(max_workers=num_workers) as ex:
-            futures = {ex.submit(_crop_one, *t): t for t in tasks}
-            for f in progress_iter(as_completed(futures), total=len(futures), desc="crop"):
-                try:
-                    out_row, ok = f.result()
-                    if ok:
-                        out_rows.append(out_row)
-                except Exception as e:
-                    logger.warning("Crop task failed: %s", e)
+        # Multiple tomograms: parallelize by tomogram group.
+        if num_workers <= 1 or len(tomo_groups) == 1:
+            for tomo_path, group_tasks in tomo_groups:
+                rows, p, f = _process_tomo_group(
+                    tomo_path,
+                    group_tasks,
+                    num_workers=1,
+                    progress_log_every=progress_log_every,
+                )
+                out_rows.extend(rows)
+                processed += p
+                failed += f
+        else:
+            max_group_workers = min(num_workers, len(tomo_groups))
+            with ThreadPoolExecutor(max_workers=max_group_workers) as ex:
+                futures = {
+                    ex.submit(
+                        _process_tomo_group,
+                        tomo_path,
+                        group_tasks,
+                        1,
+                        progress_log_every,
+                    ): (tomo_path, len(group_tasks))
+                    for tomo_path, group_tasks in tomo_groups
+                }
+                for f in progress_iter(as_completed(futures), total=len(futures), desc="crop"):
+                    try:
+                        rows, p, fail_cnt = f.result()
+                        out_rows.extend(rows)
+                        processed += p
+                        failed += fail_cnt
+                    except Exception as e:
+                        _tomo_path, group_n = futures[f]
+                        logger.warning("Crop tomogram-group failed: %s", e)
+                        processed += group_n
+                        failed += group_n
+
+    if processed % progress_log_every != 0:
+        logger.info(
+            "Crop progress %d/%d (success=%d failed=%d, %s)",
+            processed, total_tasks, len(out_rows), failed,
+            progress_timing_text(run_progress_start, processed, total_tasks),
+        )
 
     out_df = pd.DataFrame(out_rows)
     if not out_rows:

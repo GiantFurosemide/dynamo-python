@@ -1,6 +1,7 @@
 """Tests for pydynamo reconstruction (average)."""
 import numpy as np
 import pytest
+from scipy.ndimage import shift as ndi_shift
 
 from pydynamo.core.average import (
     apply_inverse_transform,
@@ -8,6 +9,7 @@ from pydynamo.core.average import (
     apply_symmetry,
     euler_zxz_to_rotation_matrix,
 )
+from pydynamo.core.align import rotate_volume
 
 
 def test_rotation_matrix():
@@ -23,6 +25,26 @@ def test_apply_inverse_transform():
     dx, dy, dz = 1, -1, 0
     transformed = apply_inverse_transform(vol, tdrot, tilt, narot, dx, dy, dz)
     assert transformed.shape == vol.shape
+
+
+def test_apply_inverse_transform_recovers_align_forward_model():
+    """Inverse transform should approximately invert align's rotate+shift model."""
+    ref = np.zeros((32, 32, 32), dtype=np.float32)
+    ref[10:22, 12:20, 13:19] = 1.0
+    tdrot, tilt, narot = 30.0, 20.0, 15.0
+    dx, dy, dz = 2.0, -1.0, 1.0
+
+    particle = rotate_volume(ref, tdrot, tilt, narot)
+    particle = ndi_shift(particle, (dx, dy, dz), order=1, mode="constant", cval=0.0).astype(np.float32)
+    recovered = apply_inverse_transform(particle, tdrot, tilt, narot, dx, dy, dz)
+
+    # Validate geometry by correlation, tolerant to interpolation loss.
+    a = ref.ravel().astype(np.float64)
+    b = recovered.ravel().astype(np.float64)
+    a = a - np.mean(a)
+    b = b - np.mean(b)
+    corr = float(np.sum(a * b) / (np.sqrt(np.sum(a * a) * np.sum(b * b)) + 1e-12))
+    assert corr > 0.75
 
 
 def test_average_particles():

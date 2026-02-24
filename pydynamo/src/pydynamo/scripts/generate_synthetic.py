@@ -19,7 +19,7 @@ import pandas as pd
 import starfile
 import yaml
 
-from ..runtime import configure_logging, progress_iter, write_error
+from ..runtime import configure_logging, log_command_inputs, progress_iter, write_error
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -184,6 +184,7 @@ def run(config_path=None, cli_args=None):
         with open(path) as f:
             cfg = yaml.safe_load(f) or {}
     configure_logging(cli_args, cfg, __name__, config_path=config_path)
+    log_command_inputs(logger, "gen_synthetic", config=cfg, config_path=config_path, args=cli_args, rest=[])
 
     template_path = str(cfg.get("template", "synthetic_data/emd_32820_bin4.mrc"))
     out_root = Path(cfg.get("output_root", "synthetic_data"))

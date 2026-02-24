@@ -128,3 +128,52 @@ def test_crop_tbl_outputs_relion_star(tmp_path: Path):
     assert "rlnAngleRot" in df.columns
     assert "rlnCenteredCoordinateXAngst" in df.columns
     assert "tdrot" not in df.columns
+
+
+def test_crop_grouped_loads_tomogram_once_for_single_tomo(tmp_path: Path, monkeypatch):
+    """Single-tomogram crop should load tomogram once and process grouped tasks."""
+    tomo = np.random.randn(32, 32, 32).astype(np.float32)
+    tomo_path = tmp_path / "tomo1.mrc"
+    with mrcfile.new(str(tomo_path), overwrite=True) as mrc:
+        mrc.set_data(tomo)
+
+    vll_path = tmp_path / "tomograms.vll"
+    vll_path.write_text(str(tomo_path) + "\n", encoding="utf-8")
+
+    tbl_path = tmp_path / "particles.tbl"
+    create_dynamo_table(
+        np.array([[16.0, 16.0, 16.0], [18.0, 18.0, 18.0]]),
+        output_file=str(tbl_path),
+        micrograph_names=["tomo1", "tomo1"],
+    )
+
+    output_star = tmp_path / "particles.star"
+    out_dir = tmp_path / "out"
+    cfg_path = tmp_path / "crop_grouped.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                f"particles: {tbl_path}",
+                f"vll: {vll_path}",
+                f"output_star: {output_star}",
+                f"output_dir: {out_dir}",
+                "sidelength: 8",
+                "fill: 0",
+                "num_workers: 4",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    open_count = {"n": 0}
+    orig_open = crop_cmd.mrcfile.open
+
+    def _counting_open(*args, **kwargs):
+        open_count["n"] += 1
+        return orig_open(*args, **kwargs)
+
+    monkeypatch.setattr(crop_cmd.mrcfile, "open", _counting_open)
+    args = SimpleNamespace(log_level="info", json_errors=False, log_file=None)
+    rc = crop_cmd.run(str(cfg_path), [], args)
+    assert rc == 0
+    assert open_count["n"] == 1

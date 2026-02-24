@@ -1,6 +1,7 @@
 """pydynamo reconstruction — average subtomograms to produce density map."""
 import logging
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -12,7 +13,14 @@ import yaml
 from ..core.average import apply_inverse_transform, apply_symmetry
 from ..core.wedge import get_wedge_mask
 from ..io import read_dynamo_tbl
-from ..runtime import configure_logging, progress_iter, write_error
+from ..runtime import (
+    configure_logging,
+    load_realspace_mask,
+    log_command_inputs,
+    progress_iter,
+    progress_timing_text,
+    write_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +43,7 @@ def run(config_path: str, rest: list, args) -> int:
     """Run reconstruction command. Returns exit code."""
     config = _load_config(config_path, args)
     configure_logging(args, config, __name__, config_path=config_path)
+    log_command_inputs(logger, "reconstruction", config=config, config_path=config_path, args=args, rest=rest)
 
     particles = config.get("particles")
     subtomograms = config.get("subtomograms")
@@ -50,6 +59,9 @@ def run(config_path: str, rest: list, args) -> int:
     wedge_xmin = float(config.get("wedge_xmin", -60))
     wedge_xmax = float(config.get("wedge_xmax", 60))
     fcompensate = config.get("fcompensate", False)
+    progress_log_every = max(1, int(config.get("progress_log_every", 10)))
+    mask_path = config.get("nmask")
+    mask_consistency_min_fraction = float(config.get("mask_consistency_min_fraction", 0.01))
 
     if not all([particles, subtomograms, output, sidelength]):
         _err("Missing required: particles, subtomograms, output, sidelength", args, config=config, config_path=config_path)
@@ -139,6 +151,25 @@ def run(config_path: str, rest: list, args) -> int:
     if len(paths_list) < n:
         paths_list = (paths_list * (n // len(paths_list) + 1))[:n]
 
+    try:
+        real_mask = load_realspace_mask(
+            mask_path,
+            config_path=config_path,
+            expected_shape=(int(sidelength), int(sidelength), int(sidelength)),
+        )
+    except Exception as e:
+        _err(f"Failed to load nmask: {e}", args, config=config, config_path=config_path)
+        return 1
+    if real_mask is not None:
+        frac = float(np.mean(real_mask))
+        logger.info("Reconstruction mask coverage: %.4f", frac)
+        if frac < mask_consistency_min_fraction:
+            logger.warning(
+                "Reconstruction mask coverage %.4f < threshold %.4f; average stability may degrade",
+                frac,
+                mask_consistency_min_fraction,
+            )
+
     # Load and transform
     base_dir = Path(particles).parent if isinstance(particles, str) else Path(".")
     wedge_mask = None
@@ -159,28 +190,54 @@ def run(config_path: str, rest: list, args) -> int:
     if wedge_mask is not None:
         # Fourier-space average with wedge
         from scipy.fft import fftn, ifftn
+        progress_start = time.time()
         n_acc = 0
+        n_fail = 0
+        n_proc = 0
         fft_sum = np.zeros((sidelength, sidelength, sidelength), dtype=np.complex128)
         for i, p_path in progress_iter(list(enumerate(paths_list)), total=len(paths_list), desc="recon"):
             full_path = _resolve_particle_path(p_path, base_dir, subtomograms)
+            n_proc += 1
             try:
                 with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
                     vol = mrc.data.copy()
             except Exception as e:
                 logger.warning("Failed to load %s: %s", full_path, e)
+                n_fail += 1
+                if n_proc % progress_log_every == 0 or n_proc == len(paths_list):
+                    logger.info(
+                        "Recon progress %d/%d (used=%d failed=%d, %s)",
+                        n_proc, len(paths_list), n_acc, n_fail,
+                        progress_timing_text(progress_start, n_proc, len(paths_list)),
+                    )
                 continue
             if vol.shape[0] != sidelength or vol.shape[1] != sidelength or vol.shape[2] != sidelength:
                 logger.warning("Particle %s size %s != sidelength %s", full_path, vol.shape, sidelength)
+                n_fail += 1
+                if n_proc % progress_log_every == 0 or n_proc == len(paths_list):
+                    logger.info(
+                        "Recon progress %d/%d (used=%d failed=%d, %s)",
+                        n_proc, len(paths_list), n_acc, n_fail,
+                        progress_timing_text(progress_start, n_proc, len(paths_list)),
+                    )
                 continue
             tr = apply_inverse_transform(
                 vol,
                 angles[i, 0], angles[i, 1], angles[i, 2],
                 shifts[i, 0], shifts[i, 1], shifts[i, 2],
             )
+            if real_mask is not None:
+                tr = tr * real_mask
             f = np.fft.fftshift(fftn(tr))
             f *= wedge_mask
             fft_sum += f
             n_acc += 1
+            if n_proc % progress_log_every == 0 or n_proc == len(paths_list):
+                logger.info(
+                    "Recon progress %d/%d (used=%d failed=%d, %s)",
+                    n_proc, len(paths_list), n_acc, n_fail,
+                    progress_timing_text(progress_start, n_proc, len(paths_list)),
+                )
         if n_acc == 0:
             _err("No valid particles loaded", args, config=config, config_path=config_path)
             return 1
@@ -188,28 +245,57 @@ def run(config_path: str, rest: list, args) -> int:
         denom = np.maximum(denom, 1e-12)
         avg = np.real(ifftn(np.fft.ifftshift(fft_sum / denom))).astype(np.float32)
     else:
-        particles_data = []
+        # Stream-friendly accumulation: avoid storing all transformed particles.
+        progress_start = time.time()
+        n_acc = 0
+        n_fail = 0
+        n_proc = 0
+        acc = np.zeros((sidelength, sidelength, sidelength), dtype=np.float64)
         for i, p_path in progress_iter(list(enumerate(paths_list)), total=len(paths_list), desc="recon"):
             full_path = _resolve_particle_path(p_path, base_dir, subtomograms)
+            n_proc += 1
             try:
                 with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
                     vol = mrc.data.copy()
             except Exception as e:
                 logger.warning("Failed to load %s: %s", full_path, e)
+                n_fail += 1
+                if n_proc % progress_log_every == 0 or n_proc == len(paths_list):
+                    logger.info(
+                        "Recon progress %d/%d (used=%d failed=%d, %s)",
+                        n_proc, len(paths_list), n_acc, n_fail,
+                        progress_timing_text(progress_start, n_proc, len(paths_list)),
+                    )
                 continue
             if vol.shape[0] != sidelength or vol.shape[1] != sidelength or vol.shape[2] != sidelength:
                 logger.warning("Particle %s size %s != sidelength %s", full_path, vol.shape, sidelength)
+                n_fail += 1
+                if n_proc % progress_log_every == 0 or n_proc == len(paths_list):
+                    logger.info(
+                        "Recon progress %d/%d (used=%d failed=%d, %s)",
+                        n_proc, len(paths_list), n_acc, n_fail,
+                        progress_timing_text(progress_start, n_proc, len(paths_list)),
+                    )
                 continue
             tr = apply_inverse_transform(
                 vol,
                 angles[i, 0], angles[i, 1], angles[i, 2],
                 shifts[i, 0], shifts[i, 1], shifts[i, 2],
             )
-            particles_data.append(tr)
-        if not particles_data:
+            if real_mask is not None:
+                tr = tr * real_mask
+            acc += tr
+            n_acc += 1
+            if n_proc % progress_log_every == 0 or n_proc == len(paths_list):
+                logger.info(
+                    "Recon progress %d/%d (used=%d failed=%d, %s)",
+                    n_proc, len(paths_list), n_acc, n_fail,
+                    progress_timing_text(progress_start, n_proc, len(paths_list)),
+                )
+        if n_acc == 0:
             _err("No valid particles loaded", args, config=config, config_path=config_path)
             return 1
-        avg = sum(particles_data) / len(particles_data)
+        avg = (acc / n_acc).astype(np.float32)
 
     avg = apply_symmetry(avg, symmetry)
 
@@ -220,7 +306,7 @@ def run(config_path: str, rest: list, args) -> int:
         except Exception:
             logger.warning("Failed to set output voxel_size from pixel_size=%s", pixel_size)
 
-    n_avg = n_acc if wedge_mask is not None else len(particles_data)
+    n_avg = n_acc
     logger.info("Averaged %d particles to %s", n_avg, output)
     return 0
 

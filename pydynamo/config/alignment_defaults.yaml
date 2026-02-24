@@ -5,6 +5,7 @@ pixel_size: 4.284                 # Angstrom per pixel used for lowpass conversi
 log_level: info                   # logging level: debug|info|warning|error
 log_file: alignment.log           # log output file; relative path defaults to YAML directory
 error_log_file: alignment.error.log  # error output file; relative path defaults to YAML directory
+progress_log_every: 10            # write one alignment progress log every N processed particles
 
 # --- Input ---
 particles: null                   # required: path to particle metadata (.tbl or .star)
@@ -15,14 +16,30 @@ vll: null                         # optional: tomogram list file when using Dyna
 # --- Output ---
 output_table: output/refined.tbl  # required: output refined table/star path
 output_star: null                 # optional: if set, write star; otherwise follows output_table extension
+output_average: null              # optional aligned average output .mrc; null defaults to <output_dir>/average.mrc
+average_symmetry: c1              # symmetry applied to aligned average volume (c1,c2,c4,...)
 
 # --- Search ---
 cone_step: 15.0                   # tilt angular step in degrees
-cone_range: [0, 180]              # tilt angular range [min,max] in degrees
+cone_range: [0, 180]              # cone aperture [min,max] in degrees around old orientation
 inplane_step: 15.0                # inplane angular step in degrees
-inplane_range: [0, 360]           # inplane angular range [min,max] in degrees
+inplane_range: [0, 360]           # inplane aperture [min,max] in degrees around seed narot
 shift_search: 3                   # translational search radius in voxels
+shift_mode: cube                  # shift search region: cube|ellipsoid_center|ellipsoid_follow|center_only|cylinder_z_center|cylinder_z_follow
+subpixel: true                    # true enables local subpixel refinement of best integer shift
+subpixel_method: auto             # subpixel backend: auto|quadratic3d|axis1d
+cc_mode: ncc                      # correlation backend: ncc|roseman_local
+cc_local_window: 5               # local correlation window size (odd voxels) for roseman_local
+cc_local_eps: 1.0e-8             # numerical epsilon for local variance stabilization
 multigrid_levels: 2               # coarse-to-fine levels, 1 means single-scale
+apply_wedge_scoring: false        # true enables wedge-aware Fourier support scoring
+fsampling_mode: none              # none|table : use tbl fsampling columns to build per-particle wedge support
+wedge_apply_to: auto              # auto|both|particle|template : which side receives wedge support in scoring
+wedge_ftype: 1                    # wedge type for scoring mask (0..4)
+wedge_ymin: -48                   # wedge y minimum tilt in degrees
+wedge_ymax: 48                    # wedge y maximum tilt in degrees
+wedge_xmin: -60                   # wedge x minimum tilt in degrees
+wedge_xmax: 60                    # wedge x maximum tilt in degrees
 
 # --- Device ---
 device: auto                      # execution device: cpu|cuda|auto (auto uses all detected GPUs)
@@ -33,6 +50,8 @@ gpu_ids: null                     # optional explicit GPU id list (e.g., [0,1]);
 lowpass: null                     # optional lowpass cutoff in Angstrom; null disables lowpass
 
 # --- Masks ---
+nmask: /home/muwang/Documents/GitHub/dynamo-python/muwang_test/crop/mask.mrc                   # optional real-space mask (.mrc); nonzero voxels are used in alignment CC
+mask_consistency_min_fraction: 0.01  # warn when mask support fraction is below this threshold
 fmask: null                       # optional Fourier mask file path (reserved)
 fmask_classification: null        # optional classification Fourier mask path (reserved)
 use_gpu: true                     # compatibility flag; actual selection controlled by device/device_id/gpu_ids

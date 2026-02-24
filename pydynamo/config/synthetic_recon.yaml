@@ -20,7 +20,7 @@ output: ../synthetic_data/out_subtomograms/average.mrc  # averaged output volume
 sidelength: 64                                      # subtomogram edge length in voxels
 symmetry: c1                                        # symmetry group (c1,c2,c4,...)
 fmask: null                                         # optional Fourier mask path
-nmask: null                                         # optional real-space mask path
+nmask: null                                         # optional real-space mask (.mrc); nonzero voxels contribute to reconstruction
 
 # --- Wedge ---
 apply_wedge: false                                  # whether to apply wedge weighting
@@ -30,3 +30,4 @@ wedge_ymax: 48                                      # Y-axis maximum tilt angle 
 wedge_xmin: -60                                     # X-axis minimum tilt angle (degrees)
 wedge_xmax: 60                                      # X-axis maximum tilt angle (degrees)
 fcompensate: false                                  # divide by wedge weights in Fourier domain when true
+progress_log_every: 10                              # write progress log every N particles

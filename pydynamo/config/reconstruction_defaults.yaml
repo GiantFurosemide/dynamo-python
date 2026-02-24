@@ -20,7 +20,7 @@ output: output/average.mrc        # required: output averaged volume path
 sidelength: 64                    # required: subtomogram edge length in voxels
 symmetry: c1                      # point-group symmetry (c1,c2,c4,...)
 fmask: null                       # optional Fourier-space mask path
-nmask: null                       # optional real-space mask path
+nmask: null                       # optional real-space mask (.mrc); nonzero voxels contribute to reconstruction
 
 # --- Wedge (Dynamo table cols 13-17) ---
 apply_wedge: false                # true to apply missing wedge in reconstruction
@@ -30,3 +30,4 @@ wedge_ymax: 48                    # Y-axis maximum tilt angle (degrees)
 wedge_xmin: -60                   # X-axis minimum tilt angle (degrees; ftype 2/4)
 wedge_xmax: 60                    # X-axis maximum tilt angle (degrees; ftype 2/4)
 fcompensate: false                # true to divide by wedge weight sum in Fourier domain
+progress_log_every: 10            # write progress log every N particles

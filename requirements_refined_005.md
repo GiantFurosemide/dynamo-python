@@ -67,11 +67,66 @@
 - 错误输出同时保留 stderr（含 `--json-errors` 行为）
 - YAML 中显式提供 `log_file` 与 `error_log_file`
 - 当 YAML 中未显式填写路径时，默认输出到与 YAML 同目录（`<config>.log` 与 `<config>.error.log`）
+- `crop` 与 `reconstruction` 在运行中按粒子数分段写入进度日志（默认每 10 个粒子记录一次）
 
 ### T3.5 Reconstruction 输出 voxel_size 对齐配置（P0）
 
 - `reconstruction` 输出 MRC 的 `voxel_size` 必须显式写为 YAML `pixel_size`
 - 不允许依赖输入文件继承或默认值，避免下游尺度不一致
+
+### T3.6 Crop 内存优化（P0，按建议 1/2/3）
+
+- 建议 1：tomogram 读取改为 mmap/非 copy（避免每任务整卷复制）
+- 建议 2：按 tomogram 分组调度任务（每个 tomogram 只加载一次）
+- 建议 3：单 tomogram 场景使用线程并行（共享同一 volume 视图）
+- 目标：在多 worker 下显著降低峰值内存占用，不改变 crop 结果语义
+
+### T3.7 STAR 相对路径解析一致性（P0）
+
+- `alignment` / `classification` 在读取 `.star` 的 `rlnImageName` 为相对路径时：
+  - 优先从 `subtomograms` 目录解析
+  - 若未命中，再回退到 `particles.star` 所在目录
+- 目标：避免路径被错误拼接到 metadata 目录导致粒子全部 skip
+
+### T3.8 Real-space Mask YAML 接入（P0）
+
+- `alignment` / `classification` / `reconstruction` 支持在 YAML 中指定 real-space mask
+- 配置键：`nmask`
+- 约束：
+  - mask 需与参与计算体数据尺寸一致
+  - 仅 mask 非零体素参与计算（对齐 NCC、分类平均、重构累积）
+
+### T3.9 命令启动输入日志（P0）
+
+- 目标：所有命令在开始执行时记录“接收到的输入项”
+- 覆盖命令：`crop`, `reconstruction`, `alignment`, `classification`, `gen_synthetic`
+- 日志内容：
+  - command 名称
+  - `config_path`
+  - YAML 解析后的完整配置
+  - 关键 CLI 参数（`log_level`, `log_file`, `json_errors`）
+  - 透传附加参数（若存在）
+
+### T3.10 Alignment 直接重建平均体（P0）
+
+- `alignment` 在输出 `star/tbl` 后，直接基于对齐结果重建平均体
+- 输出路径：
+  - `output_average` 显式指定时按该路径写出
+  - 未指定时默认写到 alignment 输出目录下 `average.mrc`
+- 支持 `average_symmetry`（默认 `c1`）对平均体做对称化
+- 输出 `average.mrc` 的 `voxel_size` 与 `pixel_size` 保持一致
+
+### T3.11 Classification 直接输出最终平均体（P0）
+
+- `classification` 在 MRA 迭代结束后直接输出最终平均体文件，便于直接下游使用
+- 输出路径：
+  - 单参考（`references` 长度为 1）：
+    - `output_average` 显式指定时按该路径写出
+    - 未指定时默认写到 `output_dir/average.mrc`
+  - 多参考（`references` 长度 > 1）：
+    - 输出到 `output_average_dir`（未指定则为 `output_dir`）下的 `average_ref_XXX.mrc`
+- 支持 `average_symmetry`（默认 `c1`）对最终平均体做对称化
+- 输出 MRC 的 `voxel_size` 与 `pixel_size` 保持一致
 
 ### T4. 测试补全（P0）
 
@@ -84,10 +139,14 @@
   - 旋转阶段 GPU 化验证（GPU 路径不得回落到 CPU `rotate_volume`）
 - `commands/alignment`:
   - 最小配置执行并输出 star
+  - 对齐完成后自动输出 average.mrc
+  - `output_average` 可覆盖默认平均体输出路径
   - auto 模式下设备解析为全部 GPU（可通过 mock 验证）
   - 多 GPU 任务分发（可通过 mock 验证 device_id 分配）
 - `commands/classification`:
   - 单迭代可运行并输出 `average_ref_*.mrc` / `refined_table_ref_*.tbl`
+  - 迭代结束后自动输出最终平均体（单参考 `average.mrc`；多参考 `average_ref_XXX.mrc`）
+  - `output_average` 可覆盖单参考默认最终平均体路径
   - 参数透传验证（`shift_search/multigrid_levels/device`）
   - auto 模式下设备解析为全部 GPU（可通过 mock 验证）
   - 多 GPU 任务分发（可通过 mock 验证 device_id 分配）
@@ -97,6 +156,12 @@
   - 进度跟踪逻辑存在但默认静默（不输出进度条文本）
   - 触发错误时可在日志文件中看到错误记录
   - 日志与错误日志路径可由 YAML 显式指定，且默认落在 YAML 同目录
+  - 启动时会输出接收到的 YAML 输入项
+- `crop` / `reconstruction`:
+  - 日志中可见周期性进度（如 `10/100, 20/100 ...`）
+- `crop`:
+  - 在同一 tomogram 多粒子场景下，不再每粒子重复读整卷
+  - 单 tomogram + 多 worker 使用线程并行策略
 - `scripts/generate_synthetic`:
   - 小规模数据集输出完整性（tomogram/subtomogram/classification）
 - `reconstruction`:
@@ -128,7 +193,14 @@
    - [ ] 全部命令支持错误日志文件输出
    - [ ] `log_file`/`error_log_file` 在 YAML 显式可配置
    - [ ] 未显式配置时日志默认输出到 YAML 同目录
+   - [ ] `crop`/`reconstruction` 日志按 `progress_log_every` 周期输出进度（默认 10）
+   - [ ] `crop` 已实现 mmap/非 copy + 按 tomogram 分组 + 单 tomogram 线程并行
    - [ ] `reconstruction` 输出 MRC 的 `voxel_size` 等于 YAML `pixel_size`
+   - [ ] `alignment` / `classification` 对 STAR 相对 `rlnImageName` 可优先从 `subtomograms` 正确解析
+   - [ ] `alignment` / `classification` / `reconstruction` 可通过 YAML `nmask` 启用 real-space mask 并参与计算
+   - [ ] `crop` / `reconstruction` / `alignment` / `classification` / `gen_synthetic` 启动时会记录接收到的输入项
+   - [ ] `alignment` 可在对齐后直接输出 `average.mrc`（支持 `output_average` 与 `average_symmetry`）
+   - [ ] `classification` 可在迭代后直接输出最终平均体（支持 `output_average` / `output_average_dir` 与 `average_symmetry`）
 2. 测试完成：
    - [ ] 新增测试文件已加入仓库并可被 pytest 发现
    - [ ] 在 `pydynamo` 环境执行全量测试一次（非 dry-run）

@@ -18,10 +18,15 @@ output_star: ../synthetic_data/out_subtomograms/refined.star   # explicit star o
 
 # --- Search ---
 cone_step: 20.0                                        # tilt search step (degrees)
-cone_range: [0, 180]                                   # tilt search range [min,max] (degrees)
+cone_range: [0, 180]                                   # cone aperture [min,max] (degrees) around old orientation
 inplane_step: 20.0                                     # inplane search step (degrees)
-inplane_range: [0, 360]                                # inplane search range [min,max] (degrees)
+inplane_range: [0, 360]                                # inplane aperture [min,max] (degrees) around seed narot
 shift_search: 2                                        # translational search radius (voxels)
+shift_mode: cube                                       # shift search region: cube|ellipsoid_center|ellipsoid_follow
+subpixel: true                                         # true enables local subpixel refinement of best integer shift
+cc_mode: ncc                                           # correlation backend: ncc|roseman_local
+cc_local_window: 5                                      # local correlation window size (odd voxels) for roseman_local
+cc_local_eps: 1.0e-8                                    # numerical epsilon for local variance stabilization
 multigrid_levels: 2                                    # coarse-to-fine levels
 
 # --- Device ---
@@ -31,5 +36,6 @@ gpu_ids: null                                          # optional explicit GPU i
 
 # --- Filter ---
 lowpass: null                                          # optional lowpass cutoff in Angstrom, null disables
+nmask: null                                            # optional real-space mask (.mrc); nonzero voxels are used in alignment CC
 fmask: null                                            # optional Fourier mask path (reserved)
 fmask_classification: null                             # optional classification mask path (reserved)

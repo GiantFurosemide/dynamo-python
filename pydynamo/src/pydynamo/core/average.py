@@ -26,22 +26,29 @@ def apply_inverse_transform(
     Apply inverse of (rotation, shift) to bring particle into reference frame.
     Dynamo convention: ZXZ Euler in degrees; dx,dy,dz in voxels.
     """
-    # Inverse rotation
-    r_inv = euler_zxz_to_rotation_matrix(-tdrot, -tilt, -narot)
-    center = np.array(volume.shape) / 2.0 - 0.5
+    # Forward model in align path is approximately:
+    #   particle ~= Shift(dx,dy,dz) * Rotate(R) * reference
+    # so inverse must apply reverse composition:
+    #   reference ~= Rotate(R)^(-1) * Shift^(-1) * particle
+    #
+    # 1) inverse translation
+    unshifted = shift(volume, (-dx, -dy, -dz), order=1, mode="constant", cval=0)
+
+    # 2) exact inverse rotation from rotation object (avoid Euler sign-negation pitfalls)
+    r = Rotation.from_euler("ZXZ", [tdrot, tilt, narot], degrees=True)
+    r_inv = r.inv().as_matrix()
+    center = np.array(unshifted.shape) / 2.0 - 0.5
     coords = np.mgrid[
-        : volume.shape[0],
-        : volume.shape[1],
-        : volume.shape[2],
+        : unshifted.shape[0],
+        : unshifted.shape[1],
+        : unshifted.shape[2],
     ].astype(float) - center.reshape(3, 1, 1, 1)
     coords_flat = coords.reshape(3, -1)
     rotated = r_inv @ coords_flat
     rotated += center.reshape(3, 1)
-    coords_new = rotated.reshape(3, volume.shape[0], volume.shape[1], volume.shape[2])
+    coords_new = rotated.reshape(3, unshifted.shape[0], unshifted.shape[1], unshifted.shape[2])
 
-    out = map_coordinates(volume, coords_new, order=1, mode="constant", cval=0)
-    # Apply inverse shift (subtract)
-    out = shift(out, (-dx, -dy, -dz), order=1, mode="constant", cval=0)
+    out = map_coordinates(unshifted, coords_new, order=1, mode="constant", cval=0)
     return out.astype(np.float32)
 
 

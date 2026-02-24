@@ -15,20 +15,42 @@ vll: null                  # optional: vll file when using Dynamo tbl input
 
 # --- Output ---
 output_dir: mra_output     # required: root output directory for per-iteration results
+output_average: null       # optional final average output .mrc for single-reference classification
+output_average_dir: null   # optional directory for final averages; default uses output_dir
+average_symmetry: c1       # symmetry applied to final average volume(s) (c1,c2,c4,...)
 
 # --- Iteration ---
 max_iterations: 5          # maximum MRA iterations
 swap: true                 # true: each particle aligns to all references each iteration
 threshold: 0.0             # optional CC threshold for averaging/selection
+progress_log_every: 10     # emit progress every N particles (includes elapsed/eta/eta_at)
+resume: false              # true resumes from latest completed iteration checkpoint under output_dir
+resume_from_iteration: null  # optional explicit completed iteration index to resume from
 
 # --- Alignment ---
 cone_step: 15.0            # tilt angular step in degrees
-cone_range: [0, 180]       # tilt angular range [min,max] in degrees
+cone_range: [0, 180]       # cone aperture [min,max] in degrees around old orientation
 inplane_step: 15.0         # inplane angular step in degrees
-inplane_range: [0, 360]    # inplane angular range [min,max] in degrees
+inplane_range: [0, 360]    # inplane aperture [min,max] in degrees around seed narot
 shift_search: 3            # translational search radius in voxels
+shift_mode: cube           # shift search region: cube|ellipsoid_center|ellipsoid_follow|center_only|cylinder_z_center|cylinder_z_follow
+subpixel: true             # true enables local subpixel refinement of best integer shift
+subpixel_method: auto      # subpixel backend: auto|quadratic3d|axis1d
+cc_mode: ncc               # correlation backend: ncc|roseman_local
+cc_local_window: 5        # local correlation window size (odd voxels) for roseman_local
+cc_local_eps: 1.0e-8      # numerical epsilon for local variance stabilization
 multigrid_levels: 2        # coarse-to-fine levels, 1 means single-scale
 lowpass: null              # optional lowpass cutoff in Angstrom; null disables lowpass
+nmask: null                # optional real-space mask (.mrc); nonzero voxels are used in alignment/averaging
+mask_consistency_min_fraction: 0.01  # warn when mask support fraction is below this threshold
+apply_wedge_scoring: false  # true enables wedge-aware Fourier support scoring
+fsampling_mode: none        # none|table : use tbl fsampling columns to build per-particle wedge support
+wedge_apply_to: auto        # auto|both|particle|template : which side receives wedge support in scoring
+wedge_ftype: 1              # wedge type for scoring mask (0..4)
+wedge_ymin: -48             # wedge y minimum tilt in degrees
+wedge_ymax: 48              # wedge y maximum tilt in degrees
+wedge_xmin: -60             # wedge x minimum tilt in degrees
+wedge_xmax: 60              # wedge x maximum tilt in degrees
 
 # --- Device ---
 device: auto               # execution device: cpu|cuda|auto (auto uses all detected GPUs)
