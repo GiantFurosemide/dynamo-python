@@ -575,6 +575,56 @@ def test_alignment_command_builds_wedge_mask_for_scoring(tmp_path: Path, monkeyp
     assert captured["wedge_mask"] is not None
 
 
+def test_alignment_command_multigrid_wedge_scoring_does_not_broadcast_mismatch(tmp_path: Path):
+    """multigrid + wedge scoring should run without coarse-stage shape broadcast failures."""
+    ref = np.zeros((24, 24, 24), dtype=np.float32)
+    ref[10:14, 10:14, 10:14] = 1.0
+    ref_path = tmp_path / "ref_mg_wedge.mrc"
+    part_path = tmp_path / "particle_mg_wedge.mrc"
+    _write_mrc(ref_path, ref)
+    _write_mrc(part_path, ref.copy())
+
+    particles_df = pd.DataFrame(
+        {
+            "tag": [1],
+            "rlnImageName": [str(part_path)],
+            "rlnMicrographName": ["tomo1"],
+            "x": [12.0],
+            "y": [12.0],
+            "z": [12.0],
+        }
+    )
+    particles_star = tmp_path / "particles_mg_wedge.star"
+    starfile.write(particles_df, str(particles_star), overwrite=True)
+
+    output_star = tmp_path / "aligned_mg_wedge.star"
+    cfg = {
+        "particles": str(particles_star),
+        "subtomograms": str(tmp_path),
+        "reference": str(ref_path),
+        "output_table": str(output_star),
+        "apply_wedge_scoring": True,
+        "wedge_ftype": 1,
+        "wedge_ymin": -30,
+        "wedge_ymax": 30,
+        "wedge_xmin": -60,
+        "wedge_xmax": 60,
+        "multigrid_levels": 2,
+        "cone_step": 180,
+        "inplane_step": 360,
+        "shift_search": 0,
+        "device": "cpu",
+    }
+    cfg_path = tmp_path / "alignment_mg_wedge.yaml"
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg, f, sort_keys=False)
+
+    args = SimpleNamespace(log_level="info", json_errors=False, log_file=None)
+    rc = alignment.run(str(cfg_path), [], args)
+    assert rc == 0
+    assert output_star.exists()
+
+
 def test_alignment_tbl_fsampling_mode_passes_table_fsampling(tmp_path: Path, monkeypatch):
     """tbl input with fsampling_mode=table should pass per-row fsampling metadata."""
     ref = np.zeros((8, 8, 8), dtype=np.float32)

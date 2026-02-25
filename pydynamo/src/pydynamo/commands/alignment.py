@@ -128,6 +128,13 @@ def run(config_path: str, rest: list, args) -> int:
             wedge_xmin,
             wedge_xmax,
         )
+    logger.info(
+        "Alignment shape context: ref_shape=%s multigrid_levels=%d wedge_enabled=%s wedge_shape=%s",
+        tuple(ref_vol.shape),
+        multigrid_levels,
+        bool(apply_wedge_scoring or (fsampling_mode.lower() == "table")),
+        None if wedge_mask is None else tuple(wedge_mask.shape),
+    )
 
     # Load particle table
     if particles.endswith(".star"):
@@ -249,7 +256,7 @@ def run(config_path: str, rest: list, args) -> int:
     if resolved_device == "cuda" and len(gpu_ids) > 1 and len(tasks) > 1:
         logger.info("Alignment multi-GPU scheduling on devices: %s", gpu_ids)
         with ThreadPoolExecutor(max_workers=len(gpu_ids)) as ex:
-            futures = [ex.submit(_run_one, t) for t in tasks]
+            futures = {ex.submit(_run_one, t): t for t in tasks}
             for f in progress_iter(as_completed(futures), total=len(futures), desc="alignment"):
                 processed += 1
                 try:
@@ -261,7 +268,16 @@ def run(config_path: str, rest: list, args) -> int:
                     avg_acc += tr
                     avg_used += 1
                 except Exception as e:
-                    logger.warning("Alignment task failed: %s", e)
+                    t = futures.get(f, ("?", "?", "?"))
+                    logger.warning(
+                        "Alignment task failed: %s (particle=%s full_path=%s ref_shape=%s multigrid_levels=%d wedge_enabled=%s)",
+                        e,
+                        t[1],
+                        t[2],
+                        tuple(ref_vol.shape),
+                        multigrid_levels,
+                        bool(apply_wedge_scoring or (fsampling_mode.lower() == "table")),
+                    )
                     failed += 1
                 if processed % progress_log_every == 0 or processed == len(tasks):
                     success_cnt = avg_used if write_tbl_only_stream else len(rows_pairs)
@@ -282,7 +298,15 @@ def run(config_path: str, rest: list, args) -> int:
                 avg_acc += tr
                 avg_used += 1
             except Exception as e:
-                logger.warning("Alignment task failed: %s", e)
+                logger.warning(
+                    "Alignment task failed: %s (particle=%s full_path=%s ref_shape=%s multigrid_levels=%d wedge_enabled=%s)",
+                    e,
+                    t[1],
+                    t[2],
+                    tuple(ref_vol.shape),
+                    multigrid_levels,
+                    bool(apply_wedge_scoring or (fsampling_mode.lower() == "table")),
+                )
                 failed += 1
             if processed % progress_log_every == 0 or processed == len(tasks):
                 success_cnt = avg_used if write_tbl_only_stream else len(rows_pairs)
