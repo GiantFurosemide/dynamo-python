@@ -1,0 +1,23 @@
+# Crop defaults: general -> input -> output -> crop-specific
+
+# --- General ---
+pixel_size: 4.284  # Angstrom per pixel for centered-coordinate conversion
+tomogram_size: [1000, 1000, 800]  # tomogram size [nx,ny,nz] used for centered->absolute coordinates
+log_level: info  # logging level: debug|info|warning|error
+log_file: /home/muwang/Documents/GitHub/dynamo-python/slurm_example/output/crop/crop.log  # log output file; relative path defaults to YAML directory
+error_log_file: /home/muwang/Documents/GitHub/dynamo-python/slurm_example/output/crop/crop.error.log  # error output file; relative path defaults to YAML directory
+progress_log_every: 10  # write progress log every N particles
+
+# --- Input ---
+particles: /home/muwang/Documents/GitHub/dynamo-python/muwang_test/crop/particles.tbl  # required: particle metadata path (.tbl or .star)
+vll: /home/muwang/Documents/GitHub/dynamo-python/muwang_test/crop/tomograms.vll  # optional: Dynamo .vll tomogram list file
+tomograms: null  # optional: tomogram path or list (used when vll not provided)
+
+# --- Output ---
+output_star: /home/muwang/Documents/GitHub/dynamo-python/slurm_example/output/crop/particles.star  # required: output star metadata path for cropped particles
+output_dir: /home/muwang/Documents/GitHub/dynamo-python/slurm_example/output/crop/subtomograms  # required: output directory for cropped subtomogram files
+
+# --- Crop-specific ---
+sidelength: 64  # required: cropped cube edge length in voxels (must be even)
+fill: 1  # out-of-bounds policy: -2 shrink, -1 shrink+warn, 0 zero-pad, 1 skip
+num_workers: 16  # worker count; <=0 means auto-detect and use all available CPUs
