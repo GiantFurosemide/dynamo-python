@@ -128,6 +128,7 @@ def test_crop_tbl_outputs_relion_star(tmp_path: Path):
     assert "rlnAngleRot" in df.columns
     assert "rlnCenteredCoordinateXAngst" in df.columns
     assert "tdrot" not in df.columns
+    assert str(df.loc[0, "rlnImageName"]) == "particle_000000000001.mrc"
 
 
 def test_crop_grouped_loads_tomogram_once_for_single_tomo(tmp_path: Path, monkeypatch):

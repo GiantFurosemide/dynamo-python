@@ -275,9 +275,9 @@ def run(config_path=None, cli_args=None):
         pos = (z_abs + 1, y_abs + 1, x_abs + 1)
         sub, report = crop_volume(tomogram, L, pos, fill=0)
         if sub is not None:
-            save_subtomo(sub, str(out_sub / f"particle_{i+1:06d}.mrc"))
+            save_subtomo(sub, str(out_sub / f"particle_{i+1:012d}.mrc"))
     sub_star_df = star_df.copy()
-    sub_star_df["rlnImageName"] = [f"particle_{i+1:06d}.mrc" for i in range(len(star_df))]
+    sub_star_df["rlnImageName"] = [f"particle_{i+1:012d}.mrc" for i in range(len(star_df))]
     starfile.write(sub_star_df, str(out_sub / "particles.star"), overwrite=True)
     _write_tbl_from_star(sub_star_df, str(out_sub / "particles.tbl"), pixel_size, tomogram_size)
     logger.info("Cropped %d subtomograms to %s", n_particles, out_sub)
@@ -290,12 +290,12 @@ def run(config_path=None, cli_args=None):
         noise_scale = 1.0
     all_star_rows = []
     for i, row in progress_iter(list(enumerate(sample_rows)), total=len(sample_rows), desc="gen class-real"):
-        src = out_sub / f"particle_{i+1:06d}.mrc"
-        dst = out_4cl / f"particle_{i+1:06d}.mrc"
+        src = out_sub / f"particle_{i+1:012d}.mrc"
+        dst = out_4cl / f"particle_{i+1:012d}.mrc"
         if src.exists():
             import shutil
             shutil.copy(str(src), str(dst))
-        r = {**row, "rlnImageName": f"particle_{i+1:06d}.mrc", "ref": 1}
+        r = {**row, "rlnImageName": f"particle_{i+1:012d}.mrc", "ref": 1}
         all_star_rows.append(r)
     try:
         from ..core.crop import save_subtomo
@@ -303,10 +303,10 @@ def run(config_path=None, cli_args=None):
         from pydynamo.core.crop import save_subtomo
     for i in progress_iter(range(n_noise), total=n_noise, desc="gen class-noise"):
         noise = np.random.randn(L, L, L).astype(np.float32) * noise_scale
-        save_subtomo(noise, str(out_4cl / f"noise_{i+1:06d}.mrc"))
+        save_subtomo(noise, str(out_4cl / f"noise_{i+1:012d}.mrc"))
         r = sample_rows[i % n_particles].copy()
         r["tag"] = n_particles + i + 1
-        r["rlnImageName"] = f"noise_{i+1:06d}.mrc"
+        r["rlnImageName"] = f"noise_{i+1:012d}.mrc"
         r["ref"] = 2
         r["rlnCenteredCoordinateXAngst"] = r["rlnCenteredCoordinateYAngst"] = r["rlnCenteredCoordinateZAngst"] = 0.0
         r["rlnAngleRot"] = r["rlnAngleTilt"] = r["rlnAnglePsi"] = 0.0
