@@ -21,8 +21,8 @@ conda create --name pydynamo python=3.12
 conda activate pydynamo
 cd pydynamo
 pip install --upgrade pip
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-pip install -e . --no-deps
+pip install torch  --index-url https://download.pytorch.org/whl/cu121
+pip install -e . 
 ```
 
 Validate on a compute node allocation:
