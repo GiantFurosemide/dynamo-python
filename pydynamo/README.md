@@ -4,11 +4,37 @@ Python CLI for Dynamo subtomogram averaging: crop, reconstruction, alignment, cl
 
 ## Install
 
+### Standard (local/dev)
+
 ```bash
 conda create --name pydynamo python=3.12
 conda activate pydynamo
 cd pydynamo && pip install -e .
 ```
+
+### Slurm/HPC (CUDA 12.1 on compute nodes)
+
+Use this when the login/install node has no GPU, but compute nodes have NVIDIA GPUs.
+
+```bash
+conda create --name pydynamo python=3.12
+conda activate pydynamo
+cd pydynamo
+pip install --upgrade pip
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install -e . --no-deps
+```
+
+Validate on a compute node allocation:
+
+```bash
+python -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available())"
+```
+
+Notes:
+
+- On login nodes without GPU, `torch.cuda.is_available()` can be `False` and this is expected.
+- Final CUDA validation should be done on compute nodes under Slurm allocation.
 
 ## Run
 
