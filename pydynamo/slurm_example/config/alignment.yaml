@@ -32,7 +32,7 @@ cc_mode: ncc  # correlation backend: ncc|roseman_local
 cc_local_window: 5  # local correlation window size (odd voxels) for roseman_local
 cc_local_eps: 1.0e-8  # numerical epsilon for local variance stabilization
 multigrid_levels: 2  # coarse-to-fine levels, 1 means single-scale
-apply_wedge_scoring: false  # true enables wedge-aware Fourier support scoring
+apply_wedge_scoring: true  # true enables wedge-aware Fourier support scoring
 fsampling_mode: none  # none|table : use tbl fsampling columns to build per-particle wedge support
 wedge_apply_to: auto  # auto|both|particle|template : which side receives wedge support in scoring
 wedge_ftype: 1  # wedge type for scoring mask (0..4)
