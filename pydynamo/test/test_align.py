@@ -8,6 +8,7 @@ from pydynamo.core.align import (
     _get_device,
     _iter_integer_shifts,
     _ncc_torch,
+    _resolve_wedge_apply_to,
     _dynamo_angleincrement2list,
     _local_normalized_cross_correlation,
     _local_normalized_cross_correlation_torch,
@@ -377,27 +378,19 @@ def test_gpu_subpixel_uses_same_wedge_objective_as_main_search(monkeypatch):
 
     expected = align_mod._apply_fourier_support_np((particle * mask).astype(np.float32), wedge)
     state = {"checked": False}
-    orig_compute = align_mod._compute_cc_np
+    orig_ncc = align_mod._ncc_torch
 
-    def _spy_compute(p_eval, r_eval, cc_mode, mask=None, cc_local_window=5, cc_local_eps=1e-8):
+    def _spy_ncc(a_t, b_t, mask_t):
         if not state["checked"]:
-            # First subpixel call should already use particle-side wedge-processed objective.
             state["checked"] = np.allclose(
-                np.asarray(p_eval, dtype=np.float32),
+                np.asarray(a_t.detach().cpu().numpy(), dtype=np.float32),
                 expected,
                 atol=1e-4,
                 rtol=1e-4,
             )
-        return orig_compute(
-            p_eval,
-            r_eval,
-            cc_mode=cc_mode,
-            mask=mask,
-            cc_local_window=cc_local_window,
-            cc_local_eps=cc_local_eps,
-        )
+        return orig_ncc(a_t, b_t, mask_t)
 
-    monkeypatch.setattr(align_mod, "_compute_cc_np", _spy_compute)
+    monkeypatch.setattr(align_mod, "_ncc_torch", _spy_ncc)
     _ = align_mod.align_one_particle(
         particle,
         ref,
@@ -463,6 +456,57 @@ def test_subpixel_quadratic3d_non_inferior_to_axis1d_on_fractional_shifts():
         errs_auto.append(float(np.linalg.norm(np.asarray(auto[3:6]) - true_shift)))
         errs_axis.append(float(np.linalg.norm(np.asarray(axis[3:6]) - true_shift)))
     assert float(np.mean(errs_auto)) <= float(np.mean(errs_axis)) + 0.05
+
+
+def test_wedge_apply_to_auto_contract_matrix():
+    """Auto wedge side resolution should follow explicit fs1/fs2 contract."""
+    assert _resolve_wedge_apply_to("auto", None) == "both"
+    assert _resolve_wedge_apply_to("auto", {"fs1": 1.0, "fs2": 0.0}) == "particle"
+    assert _resolve_wedge_apply_to("auto", {"fs1": 0.0, "fs2": 1.0}) == "template"
+    assert _resolve_wedge_apply_to("auto", {"fs1": 1.0, "fs2": 1.0}) == "both"
+    assert _resolve_wedge_apply_to("particle", {"fs1": 0.0, "fs2": 1.0}) == "particle"
+
+
+def test_fsampling_auto_mode_matches_expected_explicit_branch():
+    """fsampling_mode=table + auto should match the expected explicit wedge_apply_to branch."""
+    ref = np.zeros((20, 20, 20), dtype=np.float32)
+    ref[6:14, 8:12, 6:14] = 1.0
+    particle = rotate_volume(ref, 90.0, 0.0, 0.0)
+    base_kwargs = dict(
+        tdrot_step=90,
+        tdrot_range=(0, 181),
+        cone_step=180,
+        cone_range=(0, 1),
+        inplane_step=360,
+        inplane_range=(0, 1),
+        shift_search=0,
+        subpixel=False,
+        multigrid_levels=1,
+        device="cpu",
+        fsampling_mode="table",
+    )
+    fsampling_cases = [
+        ({"ftype": 1, "ymintilt": -30, "ymaxtilt": 30, "xmintilt": -60, "xmaxtilt": 60, "fs1": 1.0, "fs2": 0.0}, "particle"),
+        ({"ftype": 1, "ymintilt": -30, "ymaxtilt": 30, "xmintilt": -60, "xmaxtilt": 60, "fs1": 0.0, "fs2": 1.0}, "template"),
+        ({"ftype": 1, "ymintilt": -30, "ymaxtilt": 30, "xmintilt": -60, "xmaxtilt": 60, "fs1": 1.0, "fs2": 1.0}, "both"),
+    ]
+    for fsampling, expected_mode in fsampling_cases:
+        auto = align_one_particle(
+            particle,
+            ref,
+            wedge_apply_to="auto",
+            fsampling=fsampling,
+            **base_kwargs,
+        )
+        explicit = align_one_particle(
+            particle,
+            ref,
+            wedge_apply_to=expected_mode,
+            fsampling=fsampling,
+            **base_kwargs,
+        )
+        # Parity-grade branch assertion: auto branch equals selected explicit branch.
+        np.testing.assert_allclose(np.asarray(auto), np.asarray(explicit), atol=1e-5, rtol=1e-5)
 
 
 def test_dynamo_angleincrement2list_polar_limits():

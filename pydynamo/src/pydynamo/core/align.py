@@ -789,7 +789,7 @@ def _align_single_scale_torch_gpu(
 
     best_cc = -2.0
     best_params = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-    best_ref_np = None
+    best_ref_t = None
     shifts = list(_iter_integer_shifts(shift_search, shift_mode, shift_center=shift_center))
     if not shifts:
         shifts = [(0, 0, 0)]
@@ -847,24 +847,54 @@ def _align_single_scale_torch_gpu(
             if cc > best_cc:
                 best_cc = cc
                 best_params = (float(tdrot), float(tilt), float(narot), float(dx), float(dy), float(dz))
-                best_ref_np = ref_t.detach().cpu().numpy()
+                best_ref_t = ref_t.detach().clone()
 
-    if subpixel and best_ref_np is not None:
+    if subpixel and best_ref_t is not None:
         tdrot, tilt, narot, dx, dy, dz = best_params
         # Keep GPU subpixel objective consistent with the main search objective:
-        # use the same particle-side preprocessed volume that was used in NCC search.
-        particle_eval_np = part_eval_t.detach().cpu().numpy().astype(np.float32, copy=False)
+        # evaluate subpixel shifts on GPU with the same cc backend and preprocessed particle.
+        def _shift_tensor_interp(vol_t, sx: float, sy: float, sz: float):
+            d, h, w = vol_t.shape
+            zz, yy, xx = torch.meshgrid(
+                torch.arange(d, device=device, dtype=torch.float32),
+                torch.arange(h, device=device, dtype=torch.float32),
+                torch.arange(w, device=device, dtype=torch.float32),
+                indexing="ij",
+            )
+            z_src = zz - float(sx)
+            y_src = yy - float(sy)
+            x_src = xx - float(sz)
+            grid = torch.stack(
+                [
+                    (2.0 * x_src / max(1.0, float(w - 1))) - 1.0,
+                    (2.0 * y_src / max(1.0, float(h - 1))) - 1.0,
+                    (2.0 * z_src / max(1.0, float(d - 1))) - 1.0,
+                ],
+                dim=-1,
+            ).unsqueeze(0)
+            out = F.grid_sample(
+                vol_t.unsqueeze(0).unsqueeze(0),
+                grid,
+                mode="bilinear",
+                padding_mode="zeros",
+                align_corners=True,
+            )
+            return out[0, 0]
 
         def _cc_at(sx: float, sy: float, sz: float) -> float:
-            ref_shifted = shift(best_ref_np, (sx, sy, sz), order=1, mode="constant", cval=0)
-            return _compute_cc_np(
-                particle_eval_np,
-                ref_shifted,
-                cc_mode=cc_mode,
-                mask=mask,
-                cc_local_window=cc_local_window,
-                cc_local_eps=cc_local_eps,
-            )
+            ref_shifted_t = _shift_tensor_interp(best_ref_t, sx, sy, sz)
+            cc_backend = str(cc_mode or "ncc").lower()
+            if cc_backend == "ncc":
+                return _ncc_torch(part_eval_t, ref_shifted_t, mask_t)
+            if cc_backend == "roseman_local":
+                return _local_normalized_cross_correlation_torch(
+                    part_eval_t,
+                    ref_shifted_t,
+                    mask_t,
+                    win=cc_local_window,
+                    eps=cc_local_eps,
+                )
+            raise ValueError(f"Unsupported cc_mode: {cc_mode}")
 
         d3 = None
         if str(subpixel_method or "auto").lower() in ("auto", "quadratic3d", "3d"):
