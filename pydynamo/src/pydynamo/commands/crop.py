@@ -26,7 +26,7 @@ def _crop_one_with_volume(vol, x, y, z, sidelength, fill, output_dir, tag, row_d
     subtomo, _ = crop_volume(vol, sidelength, position, fill=fill)
     if subtomo is None:
         return None, False
-    out_path = Path(output_dir) / f"particle_{tag:06d}.mrc"
+    out_path = Path(output_dir) / f"particle_{tag:012d}.mrc"
     save_subtomo(subtomo, str(out_path))
     out_row = dict(row_dict)
     out_row["rlnImageName"] = out_path.name

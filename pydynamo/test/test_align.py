@@ -8,6 +8,7 @@ from pydynamo.core.align import (
     _get_device,
     _iter_integer_shifts,
     _ncc_torch,
+    _resample_wedge_mask_to_shape,
     _resolve_wedge_apply_to,
     _dynamo_angleincrement2list,
     _local_normalized_cross_correlation,
@@ -276,6 +277,136 @@ def test_align_accepts_wedge_aware_scoring_mask():
         device="cpu",
     )
     assert np.isfinite(out[-1])
+
+
+def test_multigrid_wedge_mask_is_resized_for_coarse_stage_cpu():
+    """multigrid+fullres wedge mask should not trigger coarse-stage broadcast mismatch."""
+    p = np.random.randn(24, 24, 24).astype(np.float32)
+    r = np.random.randn(24, 24, 24).astype(np.float32)
+    wedge_mask = np.ones((24, 24, 24), dtype=np.float32)
+    wedge_mask[:, :, 12:] = 0.0
+    out = align_one_particle(
+        p,
+        r,
+        tdrot_step=180,
+        tdrot_range=(0, 1),
+        cone_step=180,
+        cone_range=(0, 1),
+        inplane_step=360,
+        inplane_range=(0, 1),
+        shift_search=0,
+        subpixel=False,
+        multigrid_levels=2,
+        wedge_mask=wedge_mask,
+        wedge_apply_to="both",
+        device="cpu",
+    )
+    assert np.isfinite(out[-1])
+
+
+def test_multigrid_table_fsampling_wedge_mask_is_resized_for_coarse_stage_cpu():
+    """fsampling table-generated wedge mask should also be stage-consistent in multigrid."""
+    p = np.random.randn(24, 24, 24).astype(np.float32)
+    r = np.random.randn(24, 24, 24).astype(np.float32)
+    out = align_one_particle(
+        p,
+        r,
+        tdrot_step=180,
+        tdrot_range=(0, 1),
+        cone_step=180,
+        cone_range=(0, 1),
+        inplane_step=360,
+        inplane_range=(0, 1),
+        shift_search=0,
+        subpixel=False,
+        multigrid_levels=2,
+        fsampling_mode="table",
+        fsampling={
+            "ftype": 1,
+            "ymintilt": -30,
+            "ymaxtilt": 30,
+            "xmintilt": -60,
+            "xmaxtilt": 60,
+            "fs1": 1.0,
+            "fs2": 1.0,
+        },
+        wedge_apply_to="auto",
+        device="cpu",
+    )
+    assert np.isfinite(out[-1])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_multigrid_wedge_cuda_direct_mask_no_broadcast():
+    """CUDA path: multigrid + direct wedge mask should not fail with shape broadcast mismatch."""
+    p = np.random.randn(24, 24, 24).astype(np.float32)
+    r = np.random.randn(24, 24, 24).astype(np.float32)
+    wedge_mask = np.ones((24, 24, 24), dtype=np.float32)
+    wedge_mask[:, :, 12:] = 0.0
+    out = align_one_particle(
+        p,
+        r,
+        tdrot_step=180,
+        tdrot_range=(0, 1),
+        cone_step=180,
+        cone_range=(0, 1),
+        inplane_step=360,
+        inplane_range=(0, 1),
+        shift_search=0,
+        subpixel=False,
+        multigrid_levels=2,
+        wedge_mask=wedge_mask,
+        wedge_apply_to="both",
+        device="cuda",
+        device_id=0,
+    )
+    assert np.isfinite(out[-1])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_multigrid_wedge_cuda_table_auto_no_broadcast():
+    """CUDA path: multigrid + table fsampling + auto wedge side should not fail with broadcast mismatch."""
+    p = np.random.randn(24, 24, 24).astype(np.float32)
+    r = np.random.randn(24, 24, 24).astype(np.float32)
+    out = align_one_particle(
+        p,
+        r,
+        tdrot_step=180,
+        tdrot_range=(0, 1),
+        cone_step=180,
+        cone_range=(0, 1),
+        inplane_step=360,
+        inplane_range=(0, 1),
+        shift_search=0,
+        subpixel=False,
+        multigrid_levels=2,
+        fsampling_mode="table",
+        fsampling={
+            "ftype": 1,
+            "ymintilt": -30,
+            "ymaxtilt": 30,
+            "xmintilt": -60,
+            "xmaxtilt": 60,
+            "fs1": 1.0,
+            "fs2": 1.0,
+        },
+        wedge_apply_to="auto",
+        device="cuda",
+        device_id=0,
+    )
+    assert np.isfinite(out[-1])
+
+
+def test_wedge_resample_non_integer_scale_shape_and_bounds_and_no_resize_artifact():
+    """Wedge resample should be geometric, bounded, and avoid np.resize repetition fallback artifacts."""
+    src = np.linspace(0.0, 1.0, num=5 * 7 * 9, dtype=np.float32).reshape((5, 7, 9))
+    target_shape = (8, 11, 6)
+    out = _resample_wedge_mask_to_shape(src, target_shape)
+    assert out.shape == target_shape
+    assert float(np.min(out)) >= 0.0
+    assert float(np.max(out)) <= 1.0
+    resize_artifact = np.resize(src, target_shape)
+    assert not np.allclose(out, resize_artifact)
 
 
 def test_wedge_support_changes_orientation_ranking_in_controlled_case():

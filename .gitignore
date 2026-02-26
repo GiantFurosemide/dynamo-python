@@ -6,3 +6,5 @@ synthetic_data_withMissingWedge
 muwang_test/*
 pydynamo/src/pydynamo.egg-info/*
 pydynamo/.pytest_cache
+__pycache__/
+*.pyc

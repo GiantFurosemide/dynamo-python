@@ -112,9 +112,46 @@ def _subpixel_offset_3d_quadratic(cc_at) -> tuple[float, float, float] | None:
 
 def _apply_fourier_support_np(vol: np.ndarray, wedge_mask: np.ndarray) -> np.ndarray:
     """Apply per-particle Fourier support mask for wedge-aware scoring."""
+    if tuple(vol.shape) != tuple(wedge_mask.shape):
+        raise ValueError(
+            f"wedge_mask shape mismatch: volume={tuple(vol.shape)} wedge_mask={tuple(wedge_mask.shape)}"
+        )
     f = np.fft.fftshift(fftn(vol))
     f *= wedge_mask
     return np.real(ifftn(np.fft.ifftshift(f))).astype(np.float32)
+
+
+def _center_crop_or_pad(vol: np.ndarray, target_shape: tuple[int, int, int]) -> np.ndarray:
+    """Center-align volume into target shape using deterministic crop/pad."""
+    src = np.asarray(vol, dtype=np.float32)
+    out = np.zeros(target_shape, dtype=np.float32)
+    src_shape = src.shape
+    copy_shape = tuple(min(s, t) for s, t in zip(src_shape, target_shape))
+    src_start = tuple(max((s - c) // 2, 0) for s, c in zip(src_shape, copy_shape))
+    dst_start = tuple(max((t - c) // 2, 0) for t, c in zip(target_shape, copy_shape))
+    src_slices = tuple(slice(st, st + c) for st, c in zip(src_start, copy_shape))
+    dst_slices = tuple(slice(st, st + c) for st, c in zip(dst_start, copy_shape))
+    out[dst_slices] = src[src_slices]
+    return out
+
+
+def _resample_wedge_mask_to_shape(wedge_mask: np.ndarray, target_shape: tuple[int, int, int]) -> np.ndarray:
+    """Resample wedge mask to target shape for multigrid stage consistency."""
+    src = np.asarray(wedge_mask, dtype=np.float32)
+    if tuple(src.shape) == tuple(target_shape):
+        return src
+    zoom_f = tuple(float(n) / float(o) for n, o in zip(target_shape, src.shape))
+    out = zoom(src, zoom_f, order=1).astype(np.float32)
+    if tuple(out.shape) != tuple(target_shape):
+        out = _center_crop_or_pad(out, target_shape)
+    return np.clip(out, 0.0, 1.0)
+
+
+def _get_stage_wedge_mask(fullres_wedge_mask: np.ndarray | None, stage_shape: tuple[int, int, int]) -> np.ndarray | None:
+    """Return wedge mask matching stage volume shape."""
+    if fullres_wedge_mask is None:
+        return None
+    return _resample_wedge_mask_to_shape(fullres_wedge_mask, stage_shape)
 
 
 def _resolve_wedge_apply_to(mode: str, fsampling: dict | None) -> str:
@@ -383,6 +420,8 @@ def _align_single_scale(
     subpixel_method: str = "auto",
 ) -> tuple:
     """Single-scale alignment search. Returns (tdrot, tilt, narot, dx, dy, dz, cc)."""
+    if wedge_mask is not None and tuple(wedge_mask.shape) != tuple(reference.shape):
+        wedge_mask = _get_stage_wedge_mask(wedge_mask, reference.shape)
     ref_m = reference * mask
     ref_m = ref_m - np.mean(ref_m[mask])
     ref_m[~mask] = 0
@@ -550,6 +589,7 @@ def _align_one_particle_torch_gpu(
     factor = 2
     p_coarse = _downsample(p, factor)
     ref_coarse = _downsample(r, factor)
+    wedge_mask_coarse = _get_stage_wedge_mask(wedge_mask, ref_coarse.shape)
     mask_coarse = _downsample(mask.astype(np.float32), factor) > 0.5
     coarse_step_c = max(cone_step * 2, 30.0)
     coarse_step_i = max(inplane_step * 2, 30.0)
@@ -567,7 +607,7 @@ def _align_one_particle_torch_gpu(
         cc_local_eps=cc_local_eps,
         angle_sampling_mode=angle_sampling_mode,
         old_angles=old_angles,
-        wedge_mask=wedge_mask,
+        wedge_mask=wedge_mask_coarse,
         wedge_apply_to=wedge_apply_to,
         subpixel_method=subpixel_method,
         device=device,
@@ -735,6 +775,8 @@ def _align_single_scale_torch_gpu(
 
     if mask is None:
         mask = np.ones_like(particle, dtype=bool)
+    if wedge_mask is not None and tuple(wedge_mask.shape) != tuple(reference.shape):
+        wedge_mask = _get_stage_wedge_mask(wedge_mask, reference.shape)
     mask_t = torch.as_tensor(mask.astype(bool), device=device)
     part_t = torch.as_tensor((particle * mask).astype(np.float32), device=device)
     ref_src_t = torch.as_tensor(reference.astype(np.float32), device=device)
@@ -1047,6 +1089,7 @@ def align_one_particle(
     factor = 2
     p_coarse = _downsample(p, factor)
     ref_coarse = _downsample(r, factor)
+    wedge_mask_coarse = _get_stage_wedge_mask(resolved_wedge_mask, ref_coarse.shape)
     # downscale mask by taking every factor-th voxel
     mask_coarse = _downsample(mask.astype(np.float32), factor) > 0.5
 
@@ -1063,7 +1106,7 @@ def align_one_particle(
         cc_local_eps=cc_local_eps,
         angle_sampling_mode=angle_sampling_mode,
         old_angles=old_angles,
-        wedge_mask=resolved_wedge_mask,
+        wedge_mask=wedge_mask_coarse,
         wedge_apply_to=resolved_apply_to,
         subpixel_method=subpixel_method,
     )
