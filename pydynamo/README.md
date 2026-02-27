@@ -117,18 +117,40 @@ pydynamo classification --i config/synthetic_class.yaml
   - `device: auto` => use CUDA if available, otherwise CPU.
   - if CUDA is available and no explicit GPU is set, all detected GPUs are used.
   - multi-GPU task distribution is by particle index round-robin.
+  - on CPU, `num_workers > 1` => multi-process alignment/classification (`<=0` => auto: cpu_count-1).
+- `reconstruction`
+  - `recon_workers > 1` => multi-process per-chunk accumulation (`<=0` => auto: cpu_count-1).
 
 Useful fields:
 
 | Field | Commands | Meaning |
 |---|---|---|
-| `num_workers` | `crop` | CPU worker count (`<=0` for auto) |
+| `num_workers` | `crop`, `alignment`, `classification` | CPU worker count (`<=0` for auto) |
+| `recon_workers` | `reconstruction` | process workers for recon (`1` = single) |
 | `device` | `alignment`,`classification` | `cpu` / `cuda` / `auto` |
 | `device_id` | `alignment`,`classification` | single GPU override |
 | `gpu_ids` | `alignment`,`classification` | explicit GPU list |
 | `progress_log_every` | all major commands | progress log frequency |
 
 `alignment` and `classification` also support wedge-aware scoring and table-driven fsampling controls via YAML.
+
+### Recommended settings for ~60k particles
+
+For large-scale runs (e.g. 60,000 particles), use explicit worker counts to avoid overloading the machine and to get predictable throughput:
+
+| Command         | Parameter          | Recommended        | Notes |
+|----------------|--------------------|--------------------|-------|
+| alignment      | num_workers        | 8–16 or 0 (auto)   | For 60k, prefer explicit 8–16; auto may use all cores |
+| alignment      | multigrid_levels   | 2                  | Keeps coarse-to-fine, controls time per particle |
+| alignment      | cone_step / inplane_step | 15       | Finer steps increase runtime significantly |
+| alignment      | device             | cuda if available  | GPU reduces wall time when supported |
+| reconstruction | recon_workers      | 8–16               | Larger values add scheduling/merge cost; 8–16 is usually sufficient |
+| classification | num_workers        | 8–16               | Same as alignment |
+| classification | max_iterations     | 3–5                | Per iteration already reads each particle once |
+| crop           | num_workers        | 4–16               | Limit by I/O and tomogram count; avoid >> tomogram count × per-tomo parallelism |
+
+- **num_workers / recon_workers**: For 60k, set explicitly to 8–16 instead of relying on auto, to avoid using all cores. Very large worker counts increase IPC and scheduling overhead.
+- **crop**: If the number of tomograms is much smaller than num_workers, some workers may sit idle; keep num_workers at or below roughly (tomogram count × desired per-tomogram parallelism) or CPU count.
 
 ---
 

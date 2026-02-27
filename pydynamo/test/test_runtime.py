@@ -3,7 +3,21 @@ import logging
 from pathlib import Path
 from types import SimpleNamespace
 
-from pydynamo.runtime import log_command_inputs, progress_timing_text, resolve_log_paths
+from pydynamo.runtime import (
+    log_command_inputs,
+    progress_timing_text,
+    resolve_cpu_workers,
+    resolve_log_paths,
+)
+
+
+def test_resolve_cpu_workers():
+    """resolve_cpu_workers: default, explicit, and <=0 for auto."""
+    assert resolve_cpu_workers(None, default=1) == 1
+    assert resolve_cpu_workers(4, default=1) == 4
+    assert resolve_cpu_workers(1, default=2) == 1
+    assert resolve_cpu_workers(0, default=1) >= 1
+    assert resolve_cpu_workers(-1, default=1) >= 1
 
 
 def test_resolve_log_paths_defaults_to_yaml_directory(tmp_path: Path):

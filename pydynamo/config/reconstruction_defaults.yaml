@@ -30,4 +30,5 @@ wedge_ymax: 48                    # Y-axis maximum tilt angle (degrees)
 wedge_xmin: -60                   # X-axis minimum tilt angle (degrees; ftype 2/4)
 wedge_xmax: 60                    # X-axis maximum tilt angle (degrees; ftype 2/4)
 fcompensate: false                # true to divide by wedge weight sum in Fourier domain
+recon_workers: 1                  # process workers (1=single; <=0 auto: cpu_count-1)
 progress_log_every: 10            # write progress log every N particles

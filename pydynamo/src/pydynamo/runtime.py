@@ -32,6 +32,23 @@ def resolve_path(raw_path: Optional[str], config_path: Optional[str]) -> Optiona
     return _resolve_path(raw_path, config_path)
 
 
+def resolve_cpu_workers(config_value, default: int = 1) -> int:
+    """
+    Resolve CPU worker count for alignment/classification/reconstruction.
+    default: when key missing or None.
+    <=0: use max(1, cpu_count - 1).
+    """
+    if config_value is None:
+        return default
+    try:
+        n = int(config_value)
+    except (TypeError, ValueError):
+        return default
+    if n <= 0:
+        return max(1, (os.cpu_count() or 1) - 1)
+    return max(1, n)
+
+
 def _default_log_paths(config_path: Optional[str]) -> tuple[Optional[str], Optional[str]]:
     """Default log/error file paths in same directory as config."""
     if not config_path:

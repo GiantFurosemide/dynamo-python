@@ -45,12 +45,13 @@ wedge_xmax: 60                    # wedge x maximum tilt in degrees
 device: auto                      # execution device: cpu|cuda|auto (auto uses all detected GPUs)
 device_id: null                   # optional single GPU id override (e.g., 0)
 gpu_ids: null                     # optional explicit GPU id list (e.g., [0,1]); null means all detected GPUs
+num_workers: 1                    # CPU path only: process workers (1=single; <=0 auto: cpu_count-1)
 
 # --- Filter ---
 lowpass: null                     # optional lowpass cutoff in Angstrom; null disables lowpass
 
 # --- Masks ---
-nmask: /home/muwang/Documents/GitHub/dynamo-python/muwang_test/crop/mask.mrc                   # optional real-space mask (.mrc); nonzero voxels are used in alignment CC
+nmask: null                       # optional real-space mask (.mrc); e.g. mask.mrc; nonzero voxels used in alignment CC
 mask_consistency_min_fraction: 0.01  # warn when mask support fraction is below this threshold
 fmask: null                       # optional Fourier mask file path (reserved)
 fmask_classification: null        # optional classification Fourier mask path (reserved)

@@ -349,6 +349,34 @@ def _local_normalized_cross_correlation(
     return float(np.mean(prod[valid]))
 
 
+def _ncc_volume_fft(
+    particle_eval: np.ndarray,
+    ref_rot: np.ndarray,
+    mask: np.ndarray,
+) -> np.ndarray | None:
+    """
+    Compute full 3D normalized cross-correlation via FFT (single shot for all shifts).
+    Used only when mask is full (None or all True) for correctness.
+    Returns ncc_vol with same shape; shift (0,0,0) at center (nx//2, ny//2, nz//2).
+    """
+    if mask is not None and not np.all(mask):
+        return None
+    a = np.asarray(particle_eval, dtype=np.float64)
+    b = np.asarray(ref_rot, dtype=np.float64)
+    a = a - np.mean(a)
+    b = b - np.mean(b)
+    sigma_a = np.sqrt(np.sum(a * a))
+    sigma_b = np.sqrt(np.sum(b * b))
+    if sigma_a < 1e-12 or sigma_b < 1e-12:
+        return None
+    fa = fftn(a)
+    fb = fftn(b)
+    corr = np.real(ifftn(np.conj(fa) * fb))
+    corr = np.fft.ifftshift(corr)
+    ncc_vol = corr / (sigma_a * sigma_b)
+    return ncc_vol.astype(np.float32)
+
+
 def _compute_cc_np(
     particle_eval: np.ndarray,
     ref_eval: np.ndarray,
@@ -461,21 +489,38 @@ def _align_single_scale(
                     t.append((float(tdrot), float(tilt), float(narot)))
         triplets = np.asarray(t, dtype=np.float32) if t else np.asarray([[0.0, 0.0, 0.0]], dtype=np.float32)
 
+    use_fft_ncc = (
+        str(cc_mode or "ncc").lower() == "ncc"
+        and (mask is None or np.all(mask))
+    )
     for tdrot, tilt, narot in triplets:
         ref_rot = rotate_volume(ref_m, float(tdrot), float(tilt), float(narot))
         if use_template_wedge:
             ref_rot = _apply_fourier_support_np(ref_rot, wedge_mask)
+        if use_fft_ncc:
+            ncc_vol = _ncc_volume_fft(particle_eval, ref_rot, mask)
+        else:
+            ncc_vol = None
+        nx, ny, nz = ref_rot.shape
+        mid = (nx // 2, ny // 2, nz // 2)
         for sx, sy, sz in shifts:
             dx, dy, dz = cx + sx, cy + sy, cz + sz
-            ref_shifted = shift(ref_rot, (dx, dy, dz), order=1, mode="constant", cval=0)
-            cc = _compute_cc_np(
-                particle_eval,
-                ref_shifted,
-                cc_mode=cc_mode,
-                mask=mask,
-                cc_local_window=cc_local_window,
-                cc_local_eps=cc_local_eps,
-            )
+            if ncc_vol is not None:
+                ix, iy, iz = mid[0] + int(dx), mid[1] + int(dy), mid[2] + int(dz)
+                if 0 <= ix < nx and 0 <= iy < ny and 0 <= iz < nz:
+                    cc = float(ncc_vol[ix, iy, iz])
+                else:
+                    cc = -2.0
+            else:
+                ref_shifted = shift(ref_rot, (dx, dy, dz), order=1, mode="constant", cval=0)
+                cc = _compute_cc_np(
+                    particle_eval,
+                    ref_shifted,
+                    cc_mode=cc_mode,
+                    mask=mask,
+                    cc_local_window=cc_local_window,
+                    cc_local_eps=cc_local_eps,
+                )
             if cc > best_cc:
                 best_cc = cc
                 best_params = (float(tdrot), float(tilt), float(narot), float(dx), float(dy), float(dz))
