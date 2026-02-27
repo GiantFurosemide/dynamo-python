@@ -8,6 +8,7 @@ from pydynamo.core.align import (
     _get_device,
     _iter_integer_shifts,
     _ncc_torch,
+    _ncc_volume_fft,
     _resample_wedge_mask_to_shape,
     _resolve_wedge_apply_to,
     _dynamo_angleincrement2list,
@@ -673,3 +674,32 @@ def test_align_dynamo_mode_accepts_old_angles():
     )
     assert len(out) == 7
     assert np.isfinite(out[-1])
+
+
+def test_fft_ncc_vs_realspace_ncc_consistency():
+    """
+    FFT-based NCC volume peak vs realspace NCC at that shift (p_012 §2.4, f_012 §5).
+    Same particle/ref, no mask: CC difference < 1e-5.
+    This test verifies CC consistency at the FFT peak shift only; full alignment
+    (dx, dy, dz) output consistency between FFT and realspace paths may be added
+    later if a realspace-only code path is exposed.
+    """
+    np.random.seed(42)
+    n = 16
+    part = np.random.randn(n, n, n).astype(np.float32) * 0.2
+    ref = np.random.randn(n, n, n).astype(np.float32) * 0.2
+
+    ncc_vol = _ncc_volume_fft(part, ref, None)
+    assert ncc_vol is not None
+    peak_flat = np.argmax(ncc_vol)
+    ix, iy, iz = np.unravel_index(peak_flat, ncc_vol.shape)
+    cc_fft = float(ncc_vol[ix, iy, iz])
+    dx = ix - n // 2
+    dy = iy - n // 2
+    dz = iz - n // 2
+
+    ref_shifted = ndi_shift(ref.astype(np.float64), (dx, dy, dz), order=1, mode="constant", cval=0)
+    cc_realspace = normalized_cross_correlation(part.astype(np.float64), ref_shifted, mask=None)
+    assert abs(cc_fft - cc_realspace) < 1e-5, (
+        f"FFT NCC {cc_fft} vs realspace NCC {cc_realspace} at shift ({dx},{dy},{dz})"
+    )

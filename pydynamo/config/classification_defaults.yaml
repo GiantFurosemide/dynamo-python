@@ -56,3 +56,4 @@ wedge_xmax: 60              # wedge x maximum tilt in degrees
 device: auto               # execution device: cpu|cuda|auto (auto uses all detected GPUs)
 device_id: null            # optional single GPU id override
 gpu_ids: null              # optional explicit GPU id list; null means all detected GPUs
+num_workers: 1             # CPU path only: process workers (1=single; <=0 auto: cpu_count-1)

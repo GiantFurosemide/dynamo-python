@@ -2,10 +2,11 @@
 import logging
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-import numpy as np
 import mrcfile
+import numpy as np
 import pandas as pd
 import starfile
 import yaml
@@ -19,6 +20,7 @@ from ..runtime import (
     log_command_inputs,
     progress_iter,
     progress_timing_text,
+    resolve_cpu_workers,
     write_error,
 )
 
@@ -37,6 +39,93 @@ def _resolve_particle_path(p_path, base_dir: Path, subtomograms) -> Path:
             if cand.exists():
                 return cand
     return base_dir / p
+
+
+def _reconstruction_chunk_worker(payload: dict):
+    """
+    Process one chunk of particles: load, transform, accumulate.
+    Chunk is processed in a streaming way: read one particle, transform, add to
+    accumulator, discard (no full-chunk load in memory; jg_015 §3.2).
+    payload: base_dir, subtomograms, paths_chunk, angles_chunk, shifts_chunk,
+             sidelength, mask_path, config_path, apply_wedge, wedge_*, fcompensate.
+    Returns (acc_or_fft_sum, n_acc) — acc is float64 for realspace, complex for Fourier.
+    """
+    from ..runtime import load_realspace_mask, resolve_path
+
+    base_dir = Path(payload["base_dir"])
+    subtomograms = payload["subtomograms"]
+    paths_chunk = payload["paths_chunk"]
+    angles_chunk = payload["angles_chunk"]
+    shifts_chunk = payload["shifts_chunk"]
+    sidelength = int(payload["sidelength"])
+    config_path = payload["config_path"]
+    apply_wedge = payload.get("apply_wedge", False)
+    fcompensate = payload.get("fcompensate", False)
+
+    real_mask = None
+    if payload.get("mask_path") is not None:
+        real_mask = load_realspace_mask(
+            payload["mask_path"],
+            config_path=config_path,
+            expected_shape=(sidelength, sidelength, sidelength),
+        )
+    wedge_mask = None
+    if apply_wedge:
+        wedge_mask = get_wedge_mask(
+            (sidelength, sidelength, sidelength),
+            ftype=int(payload.get("wedge_ftype", 1)),
+            ymintilt=float(payload.get("wedge_ymin", -48)),
+            ymaxtilt=float(payload.get("wedge_ymax", 48)),
+            xmintilt=float(payload.get("wedge_xmin", -60)),
+            xmaxtilt=float(payload.get("wedge_xmax", 60)),
+        )
+
+    n_acc = 0
+    if wedge_mask is not None:
+        from scipy.fft import fftn, ifftn
+        fft_sum = np.zeros((sidelength, sidelength, sidelength), dtype=np.complex128)
+        for k, p_path in enumerate(paths_chunk):
+            full_path = _resolve_particle_path(p_path, base_dir, subtomograms)
+            try:
+                with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
+                    vol = np.asarray(mrc.data, dtype=np.float32)
+                    if not vol.flags.writeable:
+                        vol = vol.copy()
+            except Exception:
+                continue
+            if vol.shape[0] != sidelength or vol.shape[1] != sidelength or vol.shape[2] != sidelength:
+                continue
+            ang = angles_chunk[k]
+            sh = shifts_chunk[k]
+            tr = apply_inverse_transform(vol, ang[0], ang[1], ang[2], sh[0], sh[1], sh[2])
+            if real_mask is not None:
+                tr = tr * real_mask
+            f = np.fft.fftshift(fftn(tr))
+            f *= wedge_mask
+            fft_sum += f
+            n_acc += 1
+        return (fft_sum, n_acc)
+    else:
+        acc = np.zeros((sidelength, sidelength, sidelength), dtype=np.float64)
+        for k, p_path in enumerate(paths_chunk):
+            full_path = _resolve_particle_path(p_path, base_dir, subtomograms)
+            try:
+                with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
+                    vol = np.asarray(mrc.data, dtype=np.float32)
+                    if not vol.flags.writeable:
+                        vol = vol.copy()
+            except Exception:
+                continue
+            if vol.shape[0] != sidelength or vol.shape[1] != sidelength or vol.shape[2] != sidelength:
+                continue
+            ang = angles_chunk[k]
+            sh = shifts_chunk[k]
+            tr = apply_inverse_transform(vol, ang[0], ang[1], ang[2], sh[0], sh[1], sh[2])
+            if real_mask is not None:
+                tr = tr * real_mask
+            acc += tr
+            n_acc += 1
+        return (acc, n_acc)
 
 
 def run(config_path: str, rest: list, args) -> int:
@@ -60,6 +149,7 @@ def run(config_path: str, rest: list, args) -> int:
     wedge_xmax = float(config.get("wedge_xmax", 60))
     fcompensate = config.get("fcompensate", False)
     progress_log_every = max(1, int(config.get("progress_log_every", 10)))
+    recon_workers = resolve_cpu_workers(config.get("recon_workers"), default=1)
     mask_path = config.get("nmask")
     mask_consistency_min_fraction = float(config.get("mask_consistency_min_fraction", 0.01))
 
@@ -193,51 +283,87 @@ def run(config_path: str, rest: list, args) -> int:
         progress_start = time.time()
         n_acc = 0
         n_fail = 0
-        n_proc = 0
         fft_sum = np.zeros((sidelength, sidelength, sidelength), dtype=np.complex128)
-        for i, p_path in progress_iter(list(enumerate(paths_list)), total=len(paths_list), desc="recon"):
-            full_path = _resolve_particle_path(p_path, base_dir, subtomograms)
-            n_proc += 1
-            try:
-                with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
-                    vol = mrc.data.copy()
-            except Exception as e:
-                logger.warning("Failed to load %s: %s", full_path, e)
-                n_fail += 1
-                if n_proc % progress_log_every == 0 or n_proc == len(paths_list):
-                    logger.info(
-                        "Recon progress %d/%d (used=%d failed=%d, %s)",
-                        n_proc, len(paths_list), n_acc, n_fail,
-                        progress_timing_text(progress_start, n_proc, len(paths_list)),
-                    )
-                continue
-            if vol.shape[0] != sidelength or vol.shape[1] != sidelength or vol.shape[2] != sidelength:
-                logger.warning("Particle %s size %s != sidelength %s", full_path, vol.shape, sidelength)
-                n_fail += 1
-                if n_proc % progress_log_every == 0 or n_proc == len(paths_list):
-                    logger.info(
-                        "Recon progress %d/%d (used=%d failed=%d, %s)",
-                        n_proc, len(paths_list), n_acc, n_fail,
-                        progress_timing_text(progress_start, n_proc, len(paths_list)),
-                    )
-                continue
-            tr = apply_inverse_transform(
-                vol,
-                angles[i, 0], angles[i, 1], angles[i, 2],
-                shifts[i, 0], shifts[i, 1], shifts[i, 2],
-            )
-            if real_mask is not None:
-                tr = tr * real_mask
-            f = np.fft.fftshift(fftn(tr))
-            f *= wedge_mask
-            fft_sum += f
-            n_acc += 1
-            if n_proc % progress_log_every == 0 or n_proc == len(paths_list):
-                logger.info(
-                    "Recon progress %d/%d (used=%d failed=%d, %s)",
-                    n_proc, len(paths_list), n_acc, n_fail,
-                    progress_timing_text(progress_start, n_proc, len(paths_list)),
+        if recon_workers > 1 and len(paths_list) > 1:
+            chunk_size = max(1, (len(paths_list) + recon_workers - 1) // recon_workers)
+            payloads = []
+            for start in range(0, len(paths_list), chunk_size):
+                end = min(start + chunk_size, len(paths_list))
+                paths_chunk = paths_list[start:end]
+                angles_chunk = [tuple(angles[i]) for i in range(start, end)]
+                shifts_chunk = [tuple(shifts[i]) for i in range(start, end)]
+                payloads.append({
+                    "base_dir": str(base_dir),
+                    "subtomograms": subtomograms,
+                    "paths_chunk": paths_chunk,
+                    "angles_chunk": angles_chunk,
+                    "shifts_chunk": shifts_chunk,
+                    "sidelength": sidelength,
+                    "mask_path": mask_path,
+                    "config_path": config_path,
+                    "apply_wedge": True,
+                    "wedge_ftype": wedge_ftype,
+                    "wedge_ymin": wedge_ymin,
+                    "wedge_ymax": wedge_ymax,
+                    "wedge_xmin": wedge_xmin,
+                    "wedge_xmax": wedge_xmax,
+                    "fcompensate": fcompensate,
+                })
+            logger.info("Reconstruction Fourier path with recon_workers=%d", recon_workers)
+            with ProcessPoolExecutor(max_workers=recon_workers) as ex:
+                futures = [ex.submit(_reconstruction_chunk_worker, p) for p in payloads]
+                for f in progress_iter(as_completed(futures), total=len(futures), desc="recon"):
+                    part_fft, part_n = f.result()
+                    fft_sum += part_fft
+                    n_acc += part_n
+        else:
+            n_proc = 0
+            for i, p_path in progress_iter(list(enumerate(paths_list)), total=len(paths_list), desc="recon"):
+                full_path = _resolve_particle_path(p_path, base_dir, subtomograms)
+                n_proc += 1
+                # Read-only view + copy only when not writeable (P2 particle I/O strategy).
+                try:
+                    with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
+                        vol = np.asarray(mrc.data, dtype=np.float32)
+                        if not vol.flags.writeable:
+                            vol = vol.copy()
+                except Exception as e:
+                    logger.warning("Failed to load %s: %s", full_path, e)
+                    n_fail += 1
+                    if n_proc % progress_log_every == 0 or n_proc == len(paths_list):
+                        logger.info(
+                            "Recon progress %d/%d (used=%d failed=%d, %s)",
+                            n_proc, len(paths_list), n_acc, n_fail,
+                            progress_timing_text(progress_start, n_proc, len(paths_list)),
+                        )
+                    continue
+                if vol.shape[0] != sidelength or vol.shape[1] != sidelength or vol.shape[2] != sidelength:
+                    logger.warning("Particle %s size %s != sidelength %s", full_path, vol.shape, sidelength)
+                    n_fail += 1
+                    if n_proc % progress_log_every == 0 or n_proc == len(paths_list):
+                        logger.info(
+                            "Recon progress %d/%d (used=%d failed=%d, %s)",
+                            n_proc, len(paths_list), n_acc, n_fail,
+                            progress_timing_text(progress_start, n_proc, len(paths_list)),
+                        )
+                    continue
+                tr = apply_inverse_transform(
+                    vol,
+                    angles[i, 0], angles[i, 1], angles[i, 2],
+                    shifts[i, 0], shifts[i, 1], shifts[i, 2],
                 )
+                if real_mask is not None:
+                    tr = tr * real_mask
+                f = np.fft.fftshift(fftn(tr))
+                f *= wedge_mask
+                fft_sum += f
+                n_acc += 1
+                if n_proc % progress_log_every == 0 or n_proc == len(paths_list):
+                    logger.info(
+                        "Recon progress %d/%d (used=%d failed=%d, %s)",
+                        n_proc, len(paths_list), n_acc, n_fail,
+                        progress_timing_text(progress_start, n_proc, len(paths_list)),
+                    )
         if n_acc == 0:
             _err("No valid particles loaded", args, config=config, config_path=config_path)
             return 1
@@ -249,49 +375,80 @@ def run(config_path: str, rest: list, args) -> int:
         progress_start = time.time()
         n_acc = 0
         n_fail = 0
-        n_proc = 0
         acc = np.zeros((sidelength, sidelength, sidelength), dtype=np.float64)
-        for i, p_path in progress_iter(list(enumerate(paths_list)), total=len(paths_list), desc="recon"):
-            full_path = _resolve_particle_path(p_path, base_dir, subtomograms)
-            n_proc += 1
-            try:
-                with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
-                    vol = mrc.data.copy()
-            except Exception as e:
-                logger.warning("Failed to load %s: %s", full_path, e)
-                n_fail += 1
-                if n_proc % progress_log_every == 0 or n_proc == len(paths_list):
-                    logger.info(
-                        "Recon progress %d/%d (used=%d failed=%d, %s)",
-                        n_proc, len(paths_list), n_acc, n_fail,
-                        progress_timing_text(progress_start, n_proc, len(paths_list)),
-                    )
-                continue
-            if vol.shape[0] != sidelength or vol.shape[1] != sidelength or vol.shape[2] != sidelength:
-                logger.warning("Particle %s size %s != sidelength %s", full_path, vol.shape, sidelength)
-                n_fail += 1
-                if n_proc % progress_log_every == 0 or n_proc == len(paths_list):
-                    logger.info(
-                        "Recon progress %d/%d (used=%d failed=%d, %s)",
-                        n_proc, len(paths_list), n_acc, n_fail,
-                        progress_timing_text(progress_start, n_proc, len(paths_list)),
-                    )
-                continue
-            tr = apply_inverse_transform(
-                vol,
-                angles[i, 0], angles[i, 1], angles[i, 2],
-                shifts[i, 0], shifts[i, 1], shifts[i, 2],
-            )
-            if real_mask is not None:
-                tr = tr * real_mask
-            acc += tr
-            n_acc += 1
-            if n_proc % progress_log_every == 0 or n_proc == len(paths_list):
-                logger.info(
-                    "Recon progress %d/%d (used=%d failed=%d, %s)",
-                    n_proc, len(paths_list), n_acc, n_fail,
-                    progress_timing_text(progress_start, n_proc, len(paths_list)),
+        if recon_workers > 1 and len(paths_list) > 1:
+            chunk_size = max(1, (len(paths_list) + recon_workers - 1) // recon_workers)
+            payloads = []
+            for start in range(0, len(paths_list), chunk_size):
+                end = min(start + chunk_size, len(paths_list))
+                paths_chunk = paths_list[start:end]
+                angles_chunk = [tuple(angles[i]) for i in range(start, end)]
+                shifts_chunk = [tuple(shifts[i]) for i in range(start, end)]
+                payloads.append({
+                    "base_dir": str(base_dir),
+                    "subtomograms": subtomograms,
+                    "paths_chunk": paths_chunk,
+                    "angles_chunk": angles_chunk,
+                    "shifts_chunk": shifts_chunk,
+                    "sidelength": sidelength,
+                    "mask_path": mask_path,
+                    "config_path": config_path,
+                    "apply_wedge": False,
+                    "fcompensate": fcompensate,
+                })
+            logger.info("Reconstruction realspace path with recon_workers=%d", recon_workers)
+            with ProcessPoolExecutor(max_workers=recon_workers) as ex:
+                futures = [ex.submit(_reconstruction_chunk_worker, p) for p in payloads]
+                for f in progress_iter(as_completed(futures), total=len(futures), desc="recon"):
+                    part_acc, part_n = f.result()
+                    acc += part_acc
+                    n_acc += part_n
+        else:
+            n_proc = 0
+            for i, p_path in progress_iter(list(enumerate(paths_list)), total=len(paths_list), desc="recon"):
+                full_path = _resolve_particle_path(p_path, base_dir, subtomograms)
+                n_proc += 1
+                # Read-only view + copy only when not writeable (P2 particle I/O strategy).
+                try:
+                    with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
+                        vol = np.asarray(mrc.data, dtype=np.float32)
+                        if not vol.flags.writeable:
+                            vol = vol.copy()
+                except Exception as e:
+                    logger.warning("Failed to load %s: %s", full_path, e)
+                    n_fail += 1
+                    if n_proc % progress_log_every == 0 or n_proc == len(paths_list):
+                        logger.info(
+                            "Recon progress %d/%d (used=%d failed=%d, %s)",
+                            n_proc, len(paths_list), n_acc, n_fail,
+                            progress_timing_text(progress_start, n_proc, len(paths_list)),
+                        )
+                    continue
+                if vol.shape[0] != sidelength or vol.shape[1] != sidelength or vol.shape[2] != sidelength:
+                    logger.warning("Particle %s size %s != sidelength %s", full_path, vol.shape, sidelength)
+                    n_fail += 1
+                    if n_proc % progress_log_every == 0 or n_proc == len(paths_list):
+                        logger.info(
+                            "Recon progress %d/%d (used=%d failed=%d, %s)",
+                            n_proc, len(paths_list), n_acc, n_fail,
+                            progress_timing_text(progress_start, n_proc, len(paths_list)),
+                        )
+                    continue
+                tr = apply_inverse_transform(
+                    vol,
+                    angles[i, 0], angles[i, 1], angles[i, 2],
+                    shifts[i, 0], shifts[i, 1], shifts[i, 2],
                 )
+                if real_mask is not None:
+                    tr = tr * real_mask
+                acc += tr
+                n_acc += 1
+                if n_proc % progress_log_every == 0 or n_proc == len(paths_list):
+                    logger.info(
+                        "Recon progress %d/%d (used=%d failed=%d, %s)",
+                        n_proc, len(paths_list), n_acc, n_fail,
+                        progress_timing_text(progress_start, n_proc, len(paths_list)),
+                    )
         if n_acc == 0:
             _err("No valid particles loaded", args, config=config, config_path=config_path)
             return 1

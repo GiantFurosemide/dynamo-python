@@ -2,7 +2,7 @@
 import logging
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import mrcfile
@@ -21,10 +21,116 @@ from ..runtime import (
     log_command_inputs,
     progress_iter,
     progress_timing_text,
+    resolve_cpu_workers,
+    resolve_path,
     write_error,
 )
 
 logger = logging.getLogger(__name__)
+
+# CPU multiprocess worker state (set via initializer; one ref/mask per worker process).
+_worker_ref = None
+_worker_mask = None
+_worker_wedge = None
+_worker_params = None
+
+
+def _alignment_worker_init(ref_vol, align_mask, wedge_mask, align_params):
+    """Set ref/mask/wedge/params in worker process so each worker loads them once (jg_015)."""
+    global _worker_ref, _worker_mask, _worker_wedge, _worker_params
+    _worker_ref = ref_vol
+    _worker_mask = align_mask
+    _worker_wedge = wedge_mask
+    _worker_params = align_params
+
+
+def _alignment_cpu_worker_impl(payload: dict):
+    """
+    Run one alignment task using process-global ref/mask/wedge/params (CPU path).
+    payload: i, p_path, full_path, seed_row. Returns (i, row, tr) or raises.
+    """
+    global _worker_ref, _worker_mask, _worker_wedge, _worker_params
+    ref_vol = _worker_ref
+    align_mask = _worker_mask
+    wedge_mask = _worker_wedge
+    params = _worker_params
+
+    i = payload["i"]
+    p_path = payload["p_path"]
+    full_path = payload["full_path"]
+    seed_row = payload["seed_row"]
+
+    with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
+        part_local = np.asarray(mrc.data, dtype=np.float32)
+        if not part_local.flags.writeable:
+            part_local = part_local.copy()
+    if part_local.shape != ref_vol.shape:
+        raise RuntimeError(f"shape mismatch {part_local.shape} vs ref {ref_vol.shape}")
+
+    seed = (
+        float(seed_row.get("tdrot", 0.0)),
+        float(seed_row.get("tilt", 0.0)),
+        float(seed_row.get("narot", 0.0)),
+    )
+    wedge_ftype = params.get("wedge_ftype", 1)
+    fsampling = None
+    if seed_row:
+        fsampling = {
+            "ftype": seed_row.get("ftype", wedge_ftype),
+            "ymintilt": seed_row.get("ymintilt", params.get("wedge_ymin", -48)),
+            "ymaxtilt": seed_row.get("ymaxtilt", params.get("wedge_ymax", 48)),
+            "xmintilt": seed_row.get("xmintilt", params.get("wedge_xmin", -60)),
+            "xmaxtilt": seed_row.get("xmaxtilt", params.get("wedge_xmax", 60)),
+            "fs1": seed_row.get("fs1", np.nan),
+            "fs2": seed_row.get("fs2", np.nan),
+        }
+
+    align_kw = (
+        "cone_step", "tdrot_step", "tdrot_range", "cone_range", "inplane_step", "inplane_range",
+        "shift_search", "lowpass_angstrom", "pixel_size", "multigrid_levels", "shift_mode", "subpixel",
+        "cc_mode", "cc_local_window", "cc_local_eps", "angle_sampling_mode", "wedge_apply_to",
+        "fsampling_mode", "subpixel_method",
+    )
+    params_for_align = {k: v for k, v in params.items() if k in align_kw}
+    tdrot, tilt, narot, dx, dy, dz, cc = align_one_particle(
+        part_local,
+        ref_vol,
+        mask=align_mask,
+        old_angles=seed,
+        wedge_mask=wedge_mask,
+        fsampling=fsampling,
+        device="cpu",
+        device_id=None,
+        **params_for_align,
+    )
+    row = dict(seed_row)
+    row.update({
+        "tag": int(row.get("tag", i + 1)),
+        "tdrot": tdrot,
+        "tilt": tilt,
+        "narot": narot,
+        "dx": dx,
+        "dy": dy,
+        "dz": dz,
+        "cc": cc,
+        "cc2": cc,
+        "aligned": 1,
+        "averaged": 1,
+        "ref": int(row.get("ref", 1)),
+    })
+    row["rlnImageName"] = str(p_path)
+    tr = apply_inverse_transform(
+        part_local,
+        float(tdrot),
+        float(tilt),
+        float(narot),
+        float(dx),
+        float(dy),
+        float(dz),
+    )
+    if align_mask is not None:
+        tr = tr * align_mask
+    return (i, row, tr)
 
 
 def _resolve_particle_path(p_path, base_dir: Path, subtomograms) -> Path:
@@ -39,6 +145,145 @@ def _resolve_particle_path(p_path, base_dir: Path, subtomograms) -> Path:
             if cand.exists():
                 return cand
     return base_dir / p
+
+
+def _alignment_cpu_worker(payload: dict):
+    """
+    Run one alignment task in a worker process (CPU path).
+    payload: config_path, config, i, p_path, full_path, seed_row (dict).
+    Returns (i, row, tr) or raises.
+    """
+    from ..runtime import load_realspace_mask, resolve_path
+
+    config_path = payload["config_path"]
+    config = payload["config"]
+    i = payload["i"]
+    p_path = payload["p_path"]
+    full_path = payload["full_path"]
+    seed_row = payload["seed_row"]
+
+    ref_path = resolve_path(config.get("reference"), config_path)
+    with mrcfile.open(ref_path, mode="r", permissive=True) as mrc:
+        ref_vol = mrc.data.copy().astype(np.float32)
+    align_mask = load_realspace_mask(config.get("nmask"), config_path=config_path, expected_shape=ref_vol.shape)
+
+    wedge_ftype = int(config.get("wedge_ftype", 1))
+    wedge_ymin = float(config.get("wedge_ymin", -48))
+    wedge_ymax = float(config.get("wedge_ymax", 48))
+    wedge_xmin = float(config.get("wedge_xmin", -60))
+    wedge_xmax = float(config.get("wedge_xmax", 60))
+    wedge_mask = None
+    if config.get("apply_wedge_scoring", False):
+        wedge_mask = get_wedge_mask(
+            ref_vol.shape,
+            ftype=wedge_ftype,
+            ymintilt=wedge_ymin,
+            ymaxtilt=wedge_ymax,
+            xmintilt=wedge_xmin,
+            xmaxtilt=wedge_xmax,
+        )
+
+    with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
+        part_local = np.asarray(mrc.data, dtype=np.float32)
+        if not part_local.flags.writeable:
+            part_local = part_local.copy()
+    if part_local.shape != ref_vol.shape:
+        raise RuntimeError(f"shape mismatch {part_local.shape} vs ref {ref_vol.shape}")
+
+    seed = (
+        float(seed_row.get("tdrot", 0.0)),
+        float(seed_row.get("tilt", 0.0)),
+        float(seed_row.get("narot", 0.0)),
+    )
+    fsampling = None
+    if seed_row:
+        fsampling = {
+            "ftype": seed_row.get("ftype", wedge_ftype),
+            "ymintilt": seed_row.get("ymintilt", wedge_ymin),
+            "ymaxtilt": seed_row.get("ymaxtilt", wedge_ymax),
+            "xmintilt": seed_row.get("xmintilt", wedge_xmin),
+            "xmaxtilt": seed_row.get("xmaxtilt", wedge_xmax),
+            "fs1": seed_row.get("fs1", np.nan),
+            "fs2": seed_row.get("fs2", np.nan),
+        }
+
+    cone_step = float(config.get("cone_step", 15))
+    tdrot_step = float(config.get("tdrot_step", cone_step))
+    tdrot_range = tuple(config.get("tdrot_range", [0, 360]))
+    cone_range = tuple(config.get("cone_range", [0, 180]))
+    inplane_step = float(config.get("inplane_step", 15))
+    inplane_range = tuple(config.get("inplane_range", [0, 360]))
+    shift_search = int(config.get("shift_search", 3))
+    shift_mode = str(config.get("shift_mode", "cube"))
+    subpixel = bool(config.get("subpixel", True))
+    cc_mode = str(config.get("cc_mode", "ncc"))
+    cc_local_window = int(config.get("cc_local_window", 5))
+    cc_local_eps = float(config.get("cc_local_eps", 1e-8))
+    angle_sampling_mode = str(config.get("angle_sampling_mode", "dynamo"))
+    lowpass = config.get("lowpass")
+    pixel_size = float(config.get("pixel_size", 1.0))
+    multigrid_levels = int(config.get("multigrid_levels", 1))
+    wedge_apply_to = str(config.get("wedge_apply_to", "auto"))
+    fsampling_mode = str(config.get("fsampling_mode", "none"))
+    subpixel_method = str(config.get("subpixel_method", "auto"))
+
+    tdrot, tilt, narot, dx, dy, dz, cc = align_one_particle(
+        part_local,
+        ref_vol,
+        mask=align_mask,
+        cone_step=cone_step,
+        tdrot_step=tdrot_step,
+        tdrot_range=tdrot_range,
+        cone_range=cone_range,
+        inplane_step=inplane_step,
+        inplane_range=inplane_range,
+        shift_search=shift_search,
+        lowpass_angstrom=lowpass,
+        pixel_size=pixel_size,
+        multigrid_levels=multigrid_levels,
+        shift_mode=shift_mode,
+        subpixel=subpixel,
+        cc_mode=cc_mode,
+        cc_local_window=cc_local_window,
+        cc_local_eps=cc_local_eps,
+        angle_sampling_mode=angle_sampling_mode,
+        old_angles=seed,
+        wedge_mask=wedge_mask,
+        wedge_apply_to=wedge_apply_to,
+        fsampling=fsampling,
+        fsampling_mode=fsampling_mode,
+        subpixel_method=subpixel_method,
+        device="cpu",
+        device_id=None,
+    )
+    row = dict(seed_row)
+    row.update({
+        "tag": int(row.get("tag", i + 1)),
+        "tdrot": tdrot,
+        "tilt": tilt,
+        "narot": narot,
+        "dx": dx,
+        "dy": dy,
+        "dz": dz,
+        "cc": cc,
+        "cc2": cc,
+        "aligned": 1,
+        "averaged": 1,
+        "ref": int(row.get("ref", 1)),
+    })
+    row["rlnImageName"] = str(p_path)
+    tr = apply_inverse_transform(
+        part_local,
+        float(tdrot),
+        float(tilt),
+        float(narot),
+        float(dx),
+        float(dy),
+        float(dz),
+    )
+    if align_mask is not None:
+        tr = tr * align_mask
+    return (i, row, tr)
 
 
 def run(config_path: str, rest: list, args) -> int:
@@ -77,6 +322,7 @@ def run(config_path: str, rest: list, args) -> int:
     device_id = config.get("device_id")
     gpu_ids = config.get("gpu_ids")
     progress_log_every = max(1, int(config.get("progress_log_every", 10)))
+    num_workers = resolve_cpu_workers(config.get("num_workers"), default=1)
     mask_path = config.get("nmask")
     mask_consistency_min_fraction = float(config.get("mask_consistency_min_fraction", 0.01))
     apply_wedge_scoring = bool(config.get("apply_wedge_scoring", False))
@@ -170,7 +416,9 @@ def run(config_path: str, rest: list, args) -> int:
         i, p_path_local, full_path_local = task_tuple
         try:
             with mrcfile.open(str(full_path_local), mode="r", permissive=True) as mrc:
-                part_local = mrc.data.copy().astype(np.float32)
+                part_local = np.asarray(mrc.data, dtype=np.float32)
+                if not part_local.flags.writeable:
+                    part_local = part_local.copy()
         except Exception as e:
             raise RuntimeError(f"failed loading particle {full_path_local}: {e}")
         if part_local.shape != ref_vol.shape:
@@ -274,6 +522,78 @@ def run(config_path: str, rest: list, args) -> int:
                         e,
                         t[1],
                         t[2],
+                        tuple(ref_vol.shape),
+                        multigrid_levels,
+                        bool(apply_wedge_scoring or (fsampling_mode.lower() == "table")),
+                    )
+                    failed += 1
+                if processed % progress_log_every == 0 or processed == len(tasks):
+                    success_cnt = avg_used if write_tbl_only_stream else len(rows_pairs)
+                    logger.info(
+                        "Alignment progress %d/%d (success=%d failed=%d, %s)",
+                        processed, len(tasks), success_cnt, failed,
+                        progress_timing_text(progress_start, processed, len(tasks)),
+                    )
+    elif resolved_device == "cpu" and num_workers > 1 and len(tasks) > 1:
+        logger.info("Alignment CPU multi-process with num_workers=%d (ref/mask shared per worker)", num_workers)
+        align_params = {
+            "cone_step": cone_step,
+            "tdrot_step": tdrot_step,
+            "tdrot_range": tdrot_range,
+            "cone_range": cone_range,
+            "inplane_step": inplane_step,
+            "inplane_range": inplane_range,
+            "shift_search": shift_search,
+            "lowpass_angstrom": lowpass,
+            "pixel_size": pixel_size,
+            "multigrid_levels": multigrid_levels,
+            "shift_mode": shift_mode,
+            "subpixel": subpixel,
+            "cc_mode": cc_mode,
+            "cc_local_window": cc_local_window,
+            "cc_local_eps": cc_local_eps,
+            "angle_sampling_mode": angle_sampling_mode,
+            "wedge_apply_to": wedge_apply_to,
+            "fsampling_mode": fsampling_mode,
+            "subpixel_method": subpixel_method,
+            "wedge_ftype": wedge_ftype,
+            "wedge_ymin": wedge_ymin,
+            "wedge_ymax": wedge_ymax,
+            "wedge_xmin": wedge_xmin,
+            "wedge_xmax": wedge_xmax,
+        }
+        payloads = []
+        for (i, p_path_local, full_path_local) in tasks:
+            seed_row = tbl_df.iloc[i].to_dict() if i < len(tbl_df) else {}
+            payloads.append({
+                "i": i,
+                "p_path": p_path_local,
+                "full_path": full_path_local,
+                "seed_row": seed_row,
+            })
+        with ProcessPoolExecutor(
+            max_workers=num_workers,
+            initializer=_alignment_worker_init,
+            initargs=(ref_vol, align_mask, wedge_mask, align_params),
+        ) as ex:
+            futures = {ex.submit(_alignment_cpu_worker_impl, p): p for p in payloads}
+            for f in progress_iter(as_completed(futures), total=len(futures), desc="alignment"):
+                processed += 1
+                try:
+                    i, row, tr = f.result()
+                    if write_tbl_only_stream:
+                        tbl_stream_fh.write(_format_tbl_row(_row_to_tbl_vector(row, tomo_name_to_id)))
+                    else:
+                        rows_pairs.append((i, row))
+                    avg_acc += tr
+                    avg_used += 1
+                except Exception as e:
+                    p = futures.get(f, {})
+                    logger.warning(
+                        "Alignment task failed: %s (particle=%s full_path=%s ref_shape=%s multigrid_levels=%d wedge_enabled=%s)",
+                        e,
+                        p.get("p_path", "?"),
+                        p.get("full_path", "?"),
                         tuple(ref_vol.shape),
                         multigrid_levels,
                         bool(apply_wedge_scoring or (fsampling_mode.lower() == "table")),

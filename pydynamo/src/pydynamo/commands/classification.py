@@ -3,7 +3,7 @@ import json
 import logging
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import mrcfile
@@ -21,10 +21,15 @@ from ..runtime import (
     log_command_inputs,
     progress_iter,
     progress_timing_text,
+    resolve_cpu_workers,
+    resolve_path,
     write_error,
 )
 
 logger = logging.getLogger(__name__)
+
+# Process-local cache for classification CPU workers (ref_vols, align_mask, wedge_mask)
+_classification_worker_cache = {}
 
 
 def _resolve_particle_path(p_path, base_dir: Path, subtomograms) -> Path:
@@ -39,6 +44,172 @@ def _resolve_particle_path(p_path, base_dir: Path, subtomograms) -> Path:
             if cand.exists():
                 return cand
     return base_dir / p
+
+
+def _classification_cpu_worker(payload: dict):
+    """
+    Run one classification alignment task in a worker process (CPU path).
+    payload: config_path, config, ref_paths, pidx, p_path, full_path, seed_row, swap, ref_to_align.
+    Returns (best_ref, best_row, tr). On load failure or shape mismatch returns (0, None, None).
+    tr is the transformed volume for accumulation, or None.
+    """
+    global _classification_worker_cache
+    from ..runtime import load_realspace_mask, resolve_path
+
+    config_path = payload["config_path"]
+    config = payload["config"]
+    ref_paths = payload["ref_paths"]
+    pidx = payload["pidx"]
+    p_path = payload["p_path"]
+    full_path = payload["full_path"]
+    seed_row = payload["seed_row"]
+    swap = payload["swap"]
+    ref_to_align = payload.get("ref_to_align")
+
+    cache_key = (config_path, tuple(ref_paths))
+    if cache_key not in _classification_worker_cache:
+        ref_vols = []
+        for rp in ref_paths:
+            with mrcfile.open(rp, mode="r", permissive=True) as mrc:
+                ref_vols.append(mrc.data.copy().astype(np.float32))
+        align_mask = load_realspace_mask(
+            config.get("nmask"), config_path=config_path, expected_shape=ref_vols[0].shape
+        )
+        wedge_mask = None
+        if config.get("apply_wedge_scoring", False):
+            wedge_mask = get_wedge_mask(
+                ref_vols[0].shape,
+                ftype=int(config.get("wedge_ftype", 1)),
+                ymintilt=float(config.get("wedge_ymin", -48)),
+                ymaxtilt=float(config.get("wedge_ymax", 48)),
+                xmintilt=float(config.get("wedge_xmin", -60)),
+                xmaxtilt=float(config.get("wedge_xmax", 60)),
+            ).astype(np.float32)
+        _classification_worker_cache[cache_key] = (ref_vols, align_mask, wedge_mask)
+    ref_vols, align_mask, wedge_mask = _classification_worker_cache[cache_key]
+
+    try:
+        with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
+            part = np.asarray(mrc.data, dtype=np.float32)
+            if not part.flags.writeable:
+                part = part.copy()
+    except Exception:
+        return 0, None, None
+    if part.shape != ref_vols[0].shape:
+        return 0, None, None
+
+    nref = len(ref_vols)
+    refs_to_align = range(nref) if swap else [max(0, min(nref - 1, ref_to_align or 0))]
+    best_cc = -2
+    best_ref = 0
+    best_row = None
+
+    wedge_ftype = int(config.get("wedge_ftype", 1))
+    seed = (
+        float(seed_row.get("tdrot", 0.0)),
+        float(seed_row.get("tilt", 0.0)),
+        float(seed_row.get("narot", 0.0)),
+    )
+    fsampling = None
+    if seed_row:
+        fsampling = {
+            "ftype": seed_row.get("ftype", wedge_ftype),
+            "ymintilt": seed_row.get("ymintilt", float(config.get("wedge_ymin", -48))),
+            "ymaxtilt": seed_row.get("ymaxtilt", float(config.get("wedge_ymax", 48))),
+            "xmintilt": seed_row.get("xmintilt", float(config.get("wedge_xmin", -60))),
+            "xmaxtilt": seed_row.get("xmaxtilt", float(config.get("wedge_xmax", 60))),
+            "fs1": seed_row.get("fs1", np.nan),
+            "fs2": seed_row.get("fs2", np.nan),
+        }
+
+    cone_step = float(config.get("cone_step", 15))
+    tdrot_step = float(config.get("tdrot_step", cone_step))
+    tdrot_range = tuple(config.get("tdrot_range", [0, 360]))
+    cone_range = tuple(config.get("cone_range", [0, 180]))
+    inplane_step = float(config.get("inplane_step", 15))
+    inplane_range = tuple(config.get("inplane_range", [0, 360]))
+    shift_search = int(config.get("shift_search", 3))
+    shift_mode = str(config.get("shift_mode", "cube"))
+    subpixel = bool(config.get("subpixel", True))
+    cc_mode = str(config.get("cc_mode", "ncc"))
+    cc_local_window = int(config.get("cc_local_window", 5))
+    cc_local_eps = float(config.get("cc_local_eps", 1e-8))
+    angle_sampling_mode = str(config.get("angle_sampling_mode", "dynamo"))
+    lowpass = config.get("lowpass")
+    pixel_size = float(config.get("pixel_size", 1.0))
+    multigrid_levels = int(config.get("multigrid_levels", 1))
+    wedge_apply_to = str(config.get("wedge_apply_to", "auto"))
+    fsampling_mode = str(config.get("fsampling_mode", "none"))
+    subpixel_method = str(config.get("subpixel_method", "auto"))
+
+    for r in refs_to_align:
+        tdrot, tilt, narot, dx, dy, dz, cc = align_one_particle(
+            part,
+            ref_vols[r],
+            mask=align_mask,
+            cone_step=cone_step,
+            tdrot_step=tdrot_step,
+            tdrot_range=tdrot_range,
+            cone_range=cone_range,
+            inplane_step=inplane_step,
+            inplane_range=inplane_range,
+            shift_search=shift_search,
+            lowpass_angstrom=lowpass,
+            pixel_size=pixel_size,
+            multigrid_levels=multigrid_levels,
+            shift_mode=shift_mode,
+            subpixel=subpixel,
+            cc_mode=cc_mode,
+            cc_local_window=cc_local_window,
+            cc_local_eps=cc_local_eps,
+            angle_sampling_mode=angle_sampling_mode,
+            old_angles=seed,
+            wedge_mask=wedge_mask,
+            wedge_apply_to=wedge_apply_to,
+            fsampling=fsampling,
+            fsampling_mode=fsampling_mode,
+            subpixel_method=subpixel_method,
+            device="cpu",
+            device_id=None,
+        )
+        row = dict(seed_row)
+        row.update({
+            "tag": pidx + 1,
+            "tdrot": tdrot,
+            "tilt": tilt,
+            "narot": narot,
+            "dx": dx,
+            "dy": dy,
+            "dz": dz,
+            "cc": cc,
+            "cc2": cc,
+            "ref": r + 1,
+            "aligned": 1,
+            "averaged": 1,
+            "x": row.get("x", 0),
+            "y": row.get("y", 0),
+            "z": row.get("z", 0),
+            "rlnImageName": str(full_path),
+            "particle_idx": pidx,
+        })
+        if cc > best_cc:
+            best_cc = cc
+            best_ref = r
+            best_row = row
+    if best_row is None:
+        return 0, None, None
+    tr = apply_inverse_transform(
+        part,
+        float(best_row["tdrot"]),
+        float(best_row["tilt"]),
+        float(best_row["narot"]),
+        float(best_row["dx"]),
+        float(best_row["dy"]),
+        float(best_row["dz"]),
+    )
+    if align_mask is not None:
+        tr = tr * align_mask
+    return best_ref, best_row, tr
 
 
 def run(config_path: str, rest: list, args) -> int:
@@ -78,6 +249,7 @@ def run(config_path: str, rest: list, args) -> int:
     gpu_ids = config.get("gpu_ids")
     mask_path = config.get("nmask")
     progress_log_every = max(1, int(config.get("progress_log_every", 10)))
+    num_workers = resolve_cpu_workers(config.get("num_workers"), default=1)
     resume = bool(config.get("resume", False))
     resume_from_iteration = config.get("resume_from_iteration")
     mask_consistency_min_fraction = float(config.get("mask_consistency_min_fraction", 0.01))
@@ -179,11 +351,13 @@ def run(config_path: str, rest: list, args) -> int:
         full_path = _resolve_particle_path(p_path, base_dir, subtomograms)
         try:
             with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
-                part = mrc.data.copy().astype(np.float32)
+                part = np.asarray(mrc.data, dtype=np.float32)
+                if not part.flags.writeable:
+                    part = part.copy()
         except Exception:
-            return None, None
+            return None, None, None
         if part.shape != ref_vols[0].shape:
-            return None, None
+            return None, None, None
 
         best_cc = -2
         best_ref = 0
@@ -247,7 +421,20 @@ def run(config_path: str, rest: list, args) -> int:
                 best_cc = cc
                 best_ref = r
                 best_row = row
-        return best_ref, best_row
+        if best_row is None:
+            return 0, None, None
+        tr = apply_inverse_transform(
+            part,
+            float(best_row["tdrot"]),
+            float(best_row["tilt"]),
+            float(best_row["narot"]),
+            float(best_row["dx"]),
+            float(best_row["dy"]),
+            float(best_row["dz"]),
+        )
+        if align_mask is not None:
+            tr = tr * align_mask
+        return best_ref, best_row, tr
 
     for ite in range(start_iteration, max_iterations):
         logger.info("MRA iteration %d/%d", ite + 1, max_iterations)
@@ -256,11 +443,14 @@ def run(config_path: str, rest: list, args) -> int:
         row_paths = [ite_dir / f"rows_ref_{r+1:03d}.jsonl" for r in range(nref)]
         row_fhs = [open(p, "w", encoding="utf-8") for p in row_paths]
         per_ref_counts = [0 for _ in range(nref)]
+        per_ref_acc = [np.zeros((sidelength, sidelength, sidelength), dtype=np.float64) for _ in range(nref)]
+        per_ref_used = [0 for _ in range(nref)]
         ite_total = len(paths)
         ite_processed = 0
         ite_success = 0
         ite_failed = 0
         ite_start = time.time()
+        ref_paths_resolved = [resolve_path(r, config_path) for r in refs]
         if resolved_device == "cuda" and len(gpu_ids) > 1 and len(paths) > 1:
             logger.info("Classification multi-GPU scheduling on devices: %s", gpu_ids)
             with ThreadPoolExecutor(max_workers=len(gpu_ids)) as ex:
@@ -268,12 +458,65 @@ def run(config_path: str, rest: list, args) -> int:
                 for f in progress_iter(as_completed(futures), total=len(futures), desc=f"classify ite{ite+1}"):
                     ite_processed += 1
                     try:
-                        best_ref, best_row = f.result()
+                        best_ref, best_row, tr = f.result()
                         if best_row is not None:
                             best_row["ref"] = best_ref + 1
                             best_row["grep_average"] = 1
                             row_fhs[best_ref].write(json.dumps(best_row, ensure_ascii=True) + "\n")
                             per_ref_counts[best_ref] += 1
+                            if tr is not None:
+                                per_ref_acc[best_ref] += tr
+                                per_ref_used[best_ref] += 1
+                            ite_success += 1
+                        else:
+                            ite_failed += 1
+                    except Exception as e:
+                        logger.warning("Classification task failed: %s", e)
+                        ite_failed += 1
+                    if ite_processed % progress_log_every == 0 or ite_processed == ite_total:
+                        logger.info(
+                            "Classification iteration %d progress %d/%d (success=%d failed=%d, %s)",
+                            ite + 1,
+                            ite_processed,
+                            ite_total,
+                            ite_success,
+                            ite_failed,
+                            progress_timing_text(ite_start, ite_processed, ite_total),
+                        )
+        elif resolved_device == "cpu" and num_workers > 1 and len(paths) > 1:
+            logger.info("Classification CPU multi-process with num_workers=%d", num_workers)
+            payloads = []
+            for pidx, p_path in enumerate(paths):
+                full_path = _resolve_particle_path(p_path, base_dir, subtomograms)
+                seed_row = tbl_df.iloc[pidx].to_dict() if pidx < len(tbl_df) else {}
+                ref_to_align = None
+                if not swap and ref_tables and len(ref_tables) > 0 and pidx < len(ref_tables[0]):
+                    ref_to_align = max(0, min(nref - 1, int(ref_tables[0].iloc[pidx].get("ref", 1)) - 1))
+                payloads.append({
+                    "config_path": config_path,
+                    "config": config,
+                    "ref_paths": ref_paths_resolved,
+                    "pidx": pidx,
+                    "p_path": p_path,
+                    "full_path": str(full_path),
+                    "seed_row": seed_row,
+                    "swap": swap,
+                    "ref_to_align": ref_to_align,
+                })
+            with ProcessPoolExecutor(max_workers=num_workers) as ex:
+                futures = [ex.submit(_classification_cpu_worker, p) for p in payloads]
+                for f in progress_iter(as_completed(futures), total=len(futures), desc=f"classify ite{ite+1}"):
+                    ite_processed += 1
+                    try:
+                        best_ref, best_row, tr = f.result()
+                        if best_row is not None:
+                            best_row["ref"] = best_ref + 1
+                            best_row["grep_average"] = 1
+                            row_fhs[best_ref].write(json.dumps(best_row, ensure_ascii=True) + "\n")
+                            per_ref_counts[best_ref] += 1
+                            if tr is not None:
+                                per_ref_acc[best_ref] += tr
+                                per_ref_used[best_ref] += 1
                             ite_success += 1
                         else:
                             ite_failed += 1
@@ -294,12 +537,15 @@ def run(config_path: str, rest: list, args) -> int:
             for pidx, p_path in progress_iter(list(enumerate(paths)), total=len(paths), desc=f"classify ite{ite+1}"):
                 ite_processed += 1
                 try:
-                    best_ref, best_row = _align_particle_task(pidx, p_path)
+                    best_ref, best_row, tr = _align_particle_task(pidx, p_path)
                     if best_row is not None:
                         best_row["ref"] = best_ref + 1
                         best_row["grep_average"] = 1
                         row_fhs[best_ref].write(json.dumps(best_row, ensure_ascii=True) + "\n")
                         per_ref_counts[best_ref] += 1
+                        if tr is not None:
+                            per_ref_acc[best_ref] += tr
+                            per_ref_used[best_ref] += 1
                         ite_success += 1
                     else:
                         ite_failed += 1
@@ -320,12 +566,10 @@ def run(config_path: str, rest: list, args) -> int:
         for fh in row_fhs:
             fh.close()
 
-        # Assemble + MRA: re-average per ref (streaming, per-reference).
+        # Assemble + MRA: use per-ref accumulators from alignment (no re-read of particles).
         for r in range(nref):
             tbl_path = ite_dir / f"refined_table_ref_{r+1:03d}.tbl"
             avg_path = ite_dir / f"average_ref_{r+1:03d}.mrc"
-            used = 0
-            acc = np.zeros((sidelength, sidelength, sidelength), dtype=np.float64)
             tomo_name_to_id = {}
             with open(tbl_path, "w", encoding="utf-8") as tbl_fh:
                 with open(row_paths[r], "r", encoding="utf-8") as row_fh:
@@ -335,28 +579,9 @@ def run(config_path: str, rest: list, args) -> int:
                             continue
                         row = json.loads(line)
                         tbl_fh.write(_format_tbl_row(_row_to_tbl_vector(row, tomo_name_to_id)))
-                        p_path = row.get("rlnImageName") or paths[min(int(row.get("particle_idx", 0)), len(paths) - 1)]
-                        full = _resolve_particle_path(p_path, base_dir, subtomograms)
-                        try:
-                            with mrcfile.open(str(full), mode="r", permissive=True) as mrc:
-                                vol = mrc.data.copy()
-                        except Exception:
-                            continue
-                        tr = apply_inverse_transform(
-                            vol,
-                            float(row.get("tdrot", 0.0)),
-                            float(row.get("tilt", 0.0)),
-                            float(row.get("narot", 0.0)),
-                            float(row.get("dx", 0.0)),
-                            float(row.get("dy", 0.0)),
-                            float(row.get("dz", 0.0)),
-                        )
-                        if align_mask is not None:
-                            tr = tr * align_mask
-                        acc += tr
-                        used += 1
+            used = per_ref_used[r]
             if used > 0:
-                avg = (acc / used).astype(np.float32)
+                avg = (per_ref_acc[r] / used).astype(np.float32)
                 with mrcfile.new(str(avg_path), overwrite=True) as mrc:
                     mrc.set_data(avg)
                 ref_vols[r] = avg
