@@ -2,10 +2,12 @@
 import logging
 import os
 import sys
+import threading
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from queue import Queue
 
 import mrcfile
 import pandas as pd
@@ -19,28 +21,49 @@ from ..runtime import configure_logging, log_command_inputs, progress_iter, prog
 
 logger = logging.getLogger(__name__)
 
+_SENTINEL = object()
 
-def _crop_one_with_volume(vol, x, y, z, sidelength, fill, output_dir, tag, row_dict):
-    """Crop one particle using already-loaded tomogram volume."""
+
+def _writer_thread(write_queue: Queue):
+    """Dedicated thread: drain write_queue, save subtomos (P2.5). out_rows collected from worker returns."""
+    while True:
+        try:
+            item = write_queue.get()
+            if item is _SENTINEL:
+                break
+            subtomo, out_path, out_row = item
+            save_subtomo(subtomo, out_path)
+        except Exception as e:
+            logger.warning("Crop writer failed: %s", e)
+
+
+def _crop_one_with_volume(vol, x, y, z, sidelength, fill, output_dir, tag, row_dict, write_queue=None):
+    """Crop one particle using already-loaded tomogram volume.
+    When write_queue is set, put (subtomo, path, out_row) for async write; else save synchronously.
+    """
     position = (z, y, x)
     subtomo, _ = crop_volume(vol, sidelength, position, fill=fill)
     if subtomo is None:
         return None, False
     out_path = Path(output_dir) / f"particle_{tag:012d}.mrc"
-    save_subtomo(subtomo, str(out_path))
     out_row = dict(row_dict)
     out_row["rlnImageName"] = out_path.name
     out_row["tag"] = tag
     out_row["x"] = x
     out_row["y"] = y
     out_row["z"] = z
+    if write_queue is not None:
+        write_queue.put((subtomo, str(out_path), out_row))
+        return out_row, True
+    save_subtomo(subtomo, str(out_path))
     return out_row, True
 
 
-def _process_tomo_group(tomo_path, group_tasks, num_workers: int, progress_log_every: int):
+def _process_tomo_group(tomo_path, group_tasks, num_workers: int, progress_log_every: int, write_queue=None):
     """
     Process all particles for a single tomogram.
     Loads tomogram once (mmap view), then crops group tasks.
+    When write_queue is set, crop workers put (subtomo, path, out_row) for async write (P2.5).
     """
     out_rows = []
     processed = 0
@@ -64,6 +87,7 @@ def _process_tomo_group(tomo_path, group_tasks, num_workers: int, progress_log_e
                             t["output_dir"],
                             t["tag"],
                             t["row_dict"],
+                            write_queue,
                         ): t
                         for t in group_tasks
                     }
@@ -96,6 +120,7 @@ def _process_tomo_group(tomo_path, group_tasks, num_workers: int, progress_log_e
                         t["output_dir"],
                         t["tag"],
                         t["row_dict"],
+                        write_queue,
                     )
                     if ok:
                         out_rows.append(out_row)
@@ -145,6 +170,8 @@ def run(config_path: str, rest: list, args) -> int:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     num_workers = _resolve_num_workers(config.get("num_workers", 0))
+    async_write = bool(config.get("async_write", False))
+    write_queue_size = max(1, int(config.get("write_queue_size", 64)))
 
     # Load particle table
     source_is_tbl = False
@@ -235,54 +262,78 @@ def run(config_path: str, rest: list, args) -> int:
         grouped[t["tomo_path"]].append(t)
 
     tomo_groups = list(grouped.items())
-    if len(tomo_groups) == 1:
-        # Single tomogram: thread parallelism shares one loaded volume.
-        rows, p, f = _process_tomo_group(
-            tomo_groups[0][0],
-            tomo_groups[0][1],
-            num_workers=num_workers,
-            progress_log_every=progress_log_every,
+    write_queue = None
+    writer_thread = None
+    if async_write:
+        write_queue = Queue(maxsize=write_queue_size)
+        writer_thread = threading.Thread(
+            target=_writer_thread,
+            args=(write_queue,),
+            daemon=False,
         )
-        out_rows.extend(rows)
-        processed += p
-        failed += f
-    else:
-        # Multiple tomograms: parallelize by tomogram group.
-        if num_workers <= 1 or len(tomo_groups) == 1:
-            for tomo_path, group_tasks in tomo_groups:
-                rows, p, f = _process_tomo_group(
-                    tomo_path,
-                    group_tasks,
-                    num_workers=1,
-                    progress_log_every=progress_log_every,
-                )
-                out_rows.extend(rows)
-                processed += p
-                failed += f
+        writer_thread.start()
+        logger.info("Crop async_write enabled (queue_size=%d)", write_queue_size)
+
+    def _run_groups():
+        nonlocal out_rows, processed, failed
+        if len(tomo_groups) == 1:
+            group_workers = num_workers
+            rows, p, f = _process_tomo_group(
+                tomo_groups[0][0],
+                tomo_groups[0][1],
+                num_workers=group_workers,
+                progress_log_every=progress_log_every,
+                write_queue=write_queue,
+            )
+            out_rows.extend(rows)
+            processed += p
+            failed += f
         else:
-            max_group_workers = min(num_workers, len(tomo_groups))
-            with ThreadPoolExecutor(max_workers=max_group_workers) as ex:
-                futures = {
-                    ex.submit(
-                        _process_tomo_group,
+            if num_workers <= 1 or len(tomo_groups) == 1:
+                group_workers = 1
+                for tomo_path, group_tasks in tomo_groups:
+                    rows, p, f = _process_tomo_group(
                         tomo_path,
                         group_tasks,
-                        1,
-                        progress_log_every,
-                    ): (tomo_path, len(group_tasks))
-                    for tomo_path, group_tasks in tomo_groups
-                }
-                for f in progress_iter(as_completed(futures), total=len(futures), desc="crop"):
-                    try:
-                        rows, p, fail_cnt = f.result()
-                        out_rows.extend(rows)
-                        processed += p
-                        failed += fail_cnt
-                    except Exception as e:
-                        _tomo_path, group_n = futures[f]
-                        logger.warning("Crop tomogram-group failed: %s", e)
-                        processed += group_n
-                        failed += group_n
+                        num_workers=group_workers,
+                        progress_log_every=progress_log_every,
+                        write_queue=write_queue,
+                    )
+                    out_rows.extend(rows)
+                    processed += p
+                    failed += f
+            else:
+                max_group_workers = min(num_workers, len(tomo_groups))
+                group_workers = max(1, num_workers // len(tomo_groups)) if len(tomo_groups) < num_workers else 1
+                with ThreadPoolExecutor(max_workers=max_group_workers) as ex:
+                    futures = {
+                        ex.submit(
+                            _process_tomo_group,
+                            tomo_path,
+                            group_tasks,
+                            group_workers,
+                            progress_log_every,
+                            write_queue,
+                        ): (tomo_path, len(group_tasks))
+                        for tomo_path, group_tasks in tomo_groups
+                    }
+                    for f in progress_iter(as_completed(futures), total=len(futures), desc="crop"):
+                        try:
+                            rows, p, fail_cnt = f.result()
+                            out_rows.extend(rows)
+                            processed += p
+                            failed += fail_cnt
+                        except Exception as e:
+                            _tomo_path, group_n = futures[f]
+                            logger.warning("Crop tomogram-group failed: %s", e)
+                            processed += group_n
+                            failed += group_n
+
+    _run_groups()
+
+    if write_queue is not None and writer_thread is not None:
+        write_queue.put(_SENTINEL)
+        writer_thread.join()
 
     if processed % progress_log_every != 0:
         logger.info(

@@ -142,14 +142,20 @@ For large-scale runs (e.g. 60,000 particles), use explicit worker counts to avoi
 |----------------|--------------------|--------------------|-------|
 | alignment      | num_workers        | 8–16 or 0 (auto)   | For 60k, prefer explicit 8–16; auto may use all cores |
 | alignment      | multigrid_levels   | 2                  | Keeps coarse-to-fine, controls time per particle |
-| alignment      | cone_step / inplane_step | 15       | Finer steps increase runtime significantly |
-| alignment      | device             | cuda if available  | GPU reduces wall time when supported |
-| reconstruction | recon_workers      | 8–16               | Larger values add scheduling/merge cost; 8–16 is usually sufficient |
-| classification | num_workers        | 8–16               | Same as alignment |
+| alignment      | cone_step / inplane_step | 15 (30 for exploration) | Finer steps increase runtime; use 30 for coarse search |
+| alignment      | chunk_size         | 100–200 or auto     | `0`/`auto` = adaptive; improves load balance |
+| alignment      | prefetch_queue_size| 2–4                 | I/O overlap when disk is bottleneck; 0=disabled |
+| alignment      | device             | cuda if available   | GPU reduces wall time when supported |
+| reconstruction | recon_workers      | 8–16                | Larger values add scheduling/merge cost; 8–16 is usually sufficient |
+| classification | num_workers        | 8–16                | Same as alignment |
+| classification | chunk_size         | 100–200 or auto     | Same as alignment |
+| classification | prefetch_queue_size| 2–4                 | Same as alignment |
 | classification | max_iterations     | 3–5                | Per iteration already reads each particle once |
 | crop           | num_workers        | 4–16               | Limit by I/O and tomogram count; avoid >> tomogram count × per-tomo parallelism |
 
-- **num_workers / recon_workers**: For 60k, set explicitly to 8–16 instead of relying on auto, to avoid using all cores. Very large worker counts increase IPC and scheduling overhead.
+- **num_workers / recon_workers**: For 60k, set explicitly to 8–16 instead of relying on auto, to avoid using all cores. Very large worker counts increase IPC and scheduling overhead. When I/O is the bottleneck (NFS, HDD), consider reducing num_workers to 4–8.
+- **chunk_size auto**: Set `chunk_size: 0` or `auto` to auto-select based on particle count and workers; chunk count ≈ 4–8× workers for load balance.
+- **chunk mode tbl**: In chunk mode, alignment/classification collect all rows before writing; for 60k this is fine (~tens of MB). For 200k+ particles, memory may become a concern; consider streaming or two-phase write.
 - **crop**: If the number of tomograms is much smaller than num_workers, some workers may sit idle; keep num_workers at or below roughly (tomogram count × desired per-tomogram parallelism) or CPU count.
 
 ---

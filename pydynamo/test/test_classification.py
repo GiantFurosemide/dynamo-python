@@ -291,6 +291,68 @@ def test_classification_writes_average_to_configured_path(tmp_path: Path):
     assert out_avg.exists()
 
 
+def test_classification_chunk_size_equivalence(tmp_path: Path):
+    """chunk_size=1 and chunk_size=100 produce equivalent outputs (p_017, f_016)."""
+    sub_dir = tmp_path / "subtomos"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    ref = np.zeros((8, 8, 8), dtype=np.float32)
+    ref[3:5, 3:5, 3:5] = 1.0
+    ref_path = tmp_path / "ref_chunk.mrc"
+    _write_mrc(ref_path, ref)
+    n_particles = 4
+    particles_df = pd.DataFrame(
+        {
+            "tag": list(range(1, n_particles + 1)),
+            "rlnImageName": [str(sub_dir / f"particle_{i:06d}.mrc") for i in range(1, n_particles + 1)],
+            "rlnMicrographName": ["tomo1"] * n_particles,
+            "x": [4.0] * n_particles,
+            "y": [4.0] * n_particles,
+            "z": [4.0] * n_particles,
+        }
+    )
+    for i in range(1, n_particles + 1):
+        _write_mrc(sub_dir / f"particle_{i:06d}.mrc", ref)
+    particles_star = tmp_path / "particles_chunk.star"
+    starfile.write(particles_df, str(particles_star), overwrite=True)
+
+    def _run(chunk_size: int):
+        out_dir = tmp_path / f"mra_c{chunk_size}"
+        cfg = {
+            "particles": str(particles_star),
+            "subtomograms": str(sub_dir),
+            "references": [str(ref_path)],
+            "output_dir": str(out_dir),
+            "max_iterations": 1,
+            "swap": True,
+            "cone_step": 90,
+            "inplane_step": 90,
+            "shift_search": 1,
+            "multigrid_levels": 1,
+            "device": "cpu",
+            "num_workers": 2,
+            "chunk_size": chunk_size,
+        }
+        cfg_path = tmp_path / f"class_c{chunk_size}.yaml"
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, sort_keys=False)
+        args = SimpleNamespace(log_level="warning", json_errors=False)
+        rc = classification.run(str(cfg_path), [], args)
+        assert rc == 0
+        tbl_path = out_dir / "ite_001" / "refined_table_ref_001.tbl"
+        avg_path = out_dir / "ite_001" / "average_ref_001.mrc"
+        assert tbl_path.exists()
+        assert avg_path.exists()
+        with open(tbl_path) as f:
+            n_rows = sum(1 for line in f if line.strip())
+        avg = mrcfile.open(str(avg_path), mode="r", permissive=True).data
+        return n_rows, avg
+
+    n1, avg1 = _run(1)
+    n2, avg2 = _run(100)
+    assert n1 == n2, "per-ref row counts should match"
+    np.testing.assert_allclose(avg1, avg2, atol=1e-4, rtol=1e-3)
+
+
 def test_classification_resume_from_checkpoint_runs_remaining_iterations_only(tmp_path: Path, monkeypatch):
     """Resume should continue from latest checkpoint, not restart from ite_001."""
     ref = np.zeros((8, 8, 8), dtype=np.float32)

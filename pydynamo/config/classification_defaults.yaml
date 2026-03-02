@@ -41,7 +41,8 @@ cc_local_window: 5        # local correlation window size (odd voxels) for rosem
 cc_local_eps: 1.0e-8      # numerical epsilon for local variance stabilization
 multigrid_levels: 2        # coarse-to-fine levels, 1 means single-scale
 lowpass: null              # optional lowpass cutoff in Angstrom; null disables lowpass
-nmask: null                # optional real-space mask (.mrc); nonzero voxels are used in alignment/averaging
+nmask: null                # optional real-space mask (.mrc); nonzero voxels used in alignment/averaging.
+                           # WARNING: non-full nmask disables FFT NCC, causing 10-100x slower alignment per particle.
 mask_consistency_min_fraction: 0.01  # warn when mask support fraction is below this threshold
 apply_wedge_scoring: false  # true enables wedge-aware Fourier support scoring
 fsampling_mode: none        # none|table : use tbl fsampling columns to build per-particle wedge support
@@ -57,3 +58,6 @@ device: auto               # execution device: cpu|cuda|auto (auto uses all dete
 device_id: null            # optional single GPU id override
 gpu_ids: null              # optional explicit GPU id list; null means all detected GPUs
 num_workers: 1             # CPU path only: process workers (1=single; <=0 auto: cpu_count-1)
+chunk_size: 100            # CPU multi-process: particles per chunk; 0/auto=adaptive (50-200 for 60k)
+prefetch_queue_size: 2    # chunk preload: 0=disabled, 2-4 for I/O overlap (jg_018 P1.1)
+gpu_angle_batch_size: 32   # GPU path: angles per batch for rotation (P1.4); 1=disable

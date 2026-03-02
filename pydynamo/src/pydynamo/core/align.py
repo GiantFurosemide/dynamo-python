@@ -407,8 +407,8 @@ def _compute_cc_np(
     raise ValueError(f"Unsupported cc_mode: {cc_mode}")
 
 
-def rotate_volume(vol: np.ndarray, tdrot: float, tilt: float, narot: float) -> np.ndarray:
-    """Apply ZXZ Euler rotation (degrees) to volume."""
+def _rotate_volume_scipy(vol: np.ndarray, tdrot: float, tilt: float, narot: float) -> np.ndarray:
+    """Apply ZXZ Euler rotation (degrees) using SciPy map_coordinates."""
     r = Rotation.from_euler("ZXZ", [tdrot, tilt, narot], degrees=True)
     mat = r.as_matrix()
     center = np.array(vol.shape) / 2.0 - 0.5
@@ -419,6 +419,92 @@ def rotate_volume(vol: np.ndarray, tdrot: float, tilt: float, narot: float) -> n
     rotated += center.reshape(3, 1)
     coords_new = rotated.reshape(3, vol.shape[0], vol.shape[1], vol.shape[2])
     return map_coordinates(vol, coords_new, order=1, mode="constant", cval=0).astype(np.float32)
+
+
+def _rotate_volume_numba_impl(vol: np.ndarray, coords_z: np.ndarray, coords_y: np.ndarray, coords_x: np.ndarray, out: np.ndarray) -> None:
+    """
+    Numba JIT kernel: trilinear interpolation from vol at (coords_z, coords_y, coords_x) into out.
+    coords_* have same shape as out; out-of-bounds samples use 0.
+    """
+    _rotate_volume_numba_interp(vol, coords_z, coords_y, coords_x, out)
+
+
+try:
+    from numba import njit
+
+    @njit(cache=True, fastmath=True)
+    def _rotate_volume_numba_interp(vol, cz, cy, cx, out):
+        d, h, w = vol.shape
+        for i in range(cz.shape[0]):
+            for j in range(cy.shape[1]):
+                for k in range(cx.shape[2]):
+                    vz, vy, vx = cz[i, j, k], cy[i, j, k], cx[i, j, k]
+                    z0 = int(np.floor(vz))
+                    y0 = int(np.floor(vy))
+                    x0 = int(np.floor(vx))
+                    z1, y1, x1 = z0 + 1, y0 + 1, x0 + 1
+                    dz, dy, dx = vz - z0, vy - y0, vx - x0
+                    acc = 0.0
+                    for iz in range(2):
+                        z = z0 + iz
+                        wz = dz if iz else (1.0 - dz)
+                        for iy in range(2):
+                            y = y0 + iy
+                            wy = (dy if iy else (1.0 - dy)) * wz
+                            for ix in range(2):
+                                x = x0 + ix
+                                w = (dx if ix else (1.0 - dx)) * wy
+                                if 0 <= z < d and 0 <= y < h and 0 <= x < w:
+                                    acc += vol[z, y, x] * w
+                    out[i, j, k] = acc
+
+    _HAS_NUMBA_ROTATE = True
+except ImportError:
+    _HAS_NUMBA_ROTATE = False
+
+    def _rotate_volume_numba_interp(vol, cz, cy, cx, out):
+        """Fallback when numba unavailable: use scipy map_coordinates."""
+        coords = np.stack([cz, cy, cx], axis=0)
+        result = map_coordinates(vol, coords, order=1, mode="constant", cval=0)
+        out[:] = result
+
+
+def _rotate_volume_numba(vol: np.ndarray, tdrot: float, tilt: float, narot: float) -> np.ndarray:
+    """Apply ZXZ Euler rotation (degrees) using Numba JIT trilinear interpolation (jg_018 P0.1)."""
+    r = Rotation.from_euler("ZXZ", [tdrot, tilt, narot], degrees=True)
+    mat = r.as_matrix().astype(np.float64)
+    d, h, w = vol.shape
+    center = np.array([(d - 1) / 2.0, (h - 1) / 2.0, (w - 1) / 2.0], dtype=np.float64)
+    zz = np.arange(d, dtype=np.float64)
+    yy = np.arange(h, dtype=np.float64)
+    xx = np.arange(w, dtype=np.float64)
+    grid_z, grid_y, grid_x = np.meshgrid(zz, yy, xx, indexing="ij")
+    coords = np.stack([grid_z.ravel() - center[0], grid_y.ravel() - center[1], grid_x.ravel() - center[2]], axis=0)
+    rotated = mat @ coords
+    rotated[0] += center[0]
+    rotated[1] += center[1]
+    rotated[2] += center[2]
+    coords_z = rotated[0].reshape(d, h, w)
+    coords_y = rotated[1].reshape(d, h, w)
+    coords_x = rotated[2].reshape(d, h, w)
+    out = np.empty_like(vol, dtype=np.float32)
+    _rotate_volume_numba_impl(vol.astype(np.float64), coords_z, coords_y, coords_x, out)
+    return out
+
+
+def _get_use_numba_rotate() -> bool:
+    """Check if Numba rotate is available and should be used."""
+    return _HAS_NUMBA_ROTATE
+
+
+def rotate_volume(vol: np.ndarray, tdrot: float, tilt: float, narot: float, use_numba: bool = True) -> np.ndarray:
+    """
+    Apply ZXZ Euler rotation (degrees) to volume.
+    use_numba: if True and numba available, use Numba JIT (faster); else SciPy map_coordinates.
+    """
+    if use_numba and _get_use_numba_rotate():
+        return _rotate_volume_numba(vol, tdrot, tilt, narot)
+    return _rotate_volume_scipy(vol, tdrot, tilt, narot)
 
 
 def _align_single_scale(
@@ -591,6 +677,7 @@ def _align_one_particle_torch_gpu(
     fsampling_mode: str = "none",
     subpixel_method: str = "auto",
     device_id: int = None,
+    gpu_angle_batch_size: int = 1,
 ):
     """PyTorch GPU path. Uses GPU for shift + NCC search."""
     import torch
@@ -630,6 +717,7 @@ def _align_one_particle_torch_gpu(
             wedge_apply_to=wedge_apply_to,
             subpixel_method=subpixel_method,
             device=device,
+            gpu_angle_batch_size=gpu_angle_batch_size,
         )
     factor = 2
     p_coarse = _downsample(p, factor)
@@ -656,6 +744,7 @@ def _align_one_particle_torch_gpu(
         wedge_apply_to=wedge_apply_to,
         subpixel_method=subpixel_method,
         device=device,
+        gpu_angle_batch_size=gpu_angle_batch_size,
     )
     shift_center = (int(dx_c * factor), int(dy_c * factor), int(dz_c * factor))
     margin = max(cone_step, inplane_step)
@@ -690,8 +779,95 @@ def _align_one_particle_torch_gpu(
         wedge_apply_to=wedge_apply_to,
         subpixel_method=subpixel_method,
         device=device,
+        gpu_angle_batch_size=gpu_angle_batch_size,
     )
 
+
+def _euler_zxz_to_rotation_matrix_batch(triplets, device):
+    """
+    Compute ZXZ Euler rotation matrices on GPU for batch of (tdrot, tilt, narot) in degrees.
+    Returns [B, 3, 3] matching scipy Rotation.from_euler("ZXZ", ...).
+    """
+    import torch
+
+    triplets = np.asarray(triplets, dtype=np.float32)
+    if triplets.ndim == 1:
+        triplets = triplets.reshape(1, 3)
+    triplets_t = torch.as_tensor(triplets, device=device, dtype=torch.float32)
+    rad_t = torch.deg2rad(triplets_t)
+
+    c1, s1 = torch.cos(rad_t[:, 0]), torch.sin(rad_t[:, 0])
+    c2, s2 = torch.cos(rad_t[:, 1]), torch.sin(rad_t[:, 1])
+    c3, s3 = torch.cos(rad_t[:, 2]), torch.sin(rad_t[:, 2])
+
+    # Rz(tdrot) @ Rx(tilt) @ Rz(narot) for ZXZ intrinsic
+    # Rz = [[c,-s,0],[s,c,0],[0,0,1]], Rx = [[1,0,0],[0,c,-s],[0,s,c]]
+    r00 = c1 * c3 - s1 * c2 * s3
+    r01 = -c1 * s3 - s1 * c2 * c3
+    r02 = s1 * s2
+    r10 = s1 * c3 + c1 * c2 * s3
+    r11 = -s1 * s3 + c1 * c2 * c3
+    r12 = -c1 * s2
+    r20 = s2 * s3
+    r21 = s2 * c3
+    r22 = c2
+
+    rot = torch.stack(
+        [
+            torch.stack([r00, r01, r02], dim=1),
+            torch.stack([r10, r11, r12], dim=1),
+            torch.stack([r20, r21, r22], dim=1),
+        ],
+        dim=1,
+    )
+    return rot
+
+
+def _rotate_volume_torch_gpu_batch(ref_src_t, triplets, device):
+    """Batch rotate ref for multiple angles; returns [B, D, H, W] (P1.4). Grid computed on GPU (jg_019 P0.1)."""
+    import torch
+    import torch.nn.functional as F
+
+    B = len(triplets)
+    d, h, w = ref_src_t.shape
+    ref_batch = ref_src_t.unsqueeze(0).expand(B, -1, -1, -1).reshape(B, 1, d, h, w)
+
+    rot_mats = _euler_zxz_to_rotation_matrix_batch(triplets, device)
+    center = torch.tensor(
+        [(d - 1) / 2.0, (h - 1) / 2.0, (w - 1) / 2.0],
+        device=device,
+        dtype=torch.float32,
+    )
+    zz = torch.arange(d, device=device, dtype=torch.float32)
+    yy = torch.arange(h, device=device, dtype=torch.float32)
+    xx = torch.arange(w, device=device, dtype=torch.float32)
+    zz, yy, xx = torch.meshgrid(zz, yy, xx, indexing="ij")
+    coords = torch.stack([zz.ravel(), yy.ravel(), xx.ravel()], dim=0)
+    coords_centered = coords - center.unsqueeze(1)
+    coords_centered = coords_centered.unsqueeze(0).expand(B, -1, -1)
+    rot_coords = torch.bmm(rot_mats, coords_centered)
+    rot_coords = rot_coords + center.unsqueeze(0).unsqueeze(2)
+
+    x_rot = rot_coords[:, 2].reshape(B, d, h, w)
+    y_rot = rot_coords[:, 1].reshape(B, d, h, w)
+    z_rot = rot_coords[:, 0].reshape(B, d, h, w)
+
+    grid_batch = torch.stack(
+        [
+            (2.0 * x_rot / max(1.0, float(w - 1))) - 1.0,
+            (2.0 * y_rot / max(1.0, float(h - 1))) - 1.0,
+            (2.0 * z_rot / max(1.0, float(d - 1))) - 1.0,
+        ],
+        dim=-1,
+    )
+    out = F.grid_sample(
+        ref_batch,
+        grid_batch,
+        mode="bilinear",
+        padding_mode="zeros",
+        align_corners=True,
+    )
+    return out[:, 0]
 
 def _shift_tensor_zero(vol_t, dx: int, dy: int, dz: int):
     """Shift 3D tensor with zero padding (not circular roll)."""
@@ -741,6 +917,67 @@ def _ncc_torch(a_t, b_t, mask_t):
     if float(denom) < 1e-12:
         return 0.0
     return float(torch.sum(ma * mb) / denom)
+
+
+def _build_shift_search_mask_torch(nx: int, ny: int, nz: int, shift_search: int, shift_mode: str, shift_center: tuple, device) -> "torch.Tensor":
+    """
+    Build boolean mask for valid shift region in ncc_vol (shape nx,ny,nz).
+    Shift (0,0,0) at center (nx//2, ny//2, nz//2). Used for O(1) argmax (f_018 F2).
+    """
+    import torch
+
+    mid = (nx // 2, ny // 2, nz // 2)
+    cx, cy, cz = shift_center
+    mask = torch.zeros((nx, ny, nz), dtype=torch.bool, device=device)
+    for sx, sy, sz in _iter_integer_shifts(shift_search, shift_mode, shift_center=shift_center):
+        dx, dy, dz = cx + sx, cy + sy, cz + sz
+        ix, iy, iz = mid[0] + int(dx), mid[1] + int(dy), mid[2] + int(dz)
+        if 0 <= ix < nx and 0 <= iy < ny and 0 <= iz < nz:
+            mask[ix, iy, iz] = True
+    return mask
+
+
+def _ncc_volume_fft_torch(part_eval_t, ref_rot_t):
+    """
+    Compute full 3D normalized cross-correlation via FFT on GPU (jg_018 P0.2).
+    Returns ncc_vol with same shape; shift (0,0,0) at center (nx//2, ny//2, nz//2).
+    Used when mask is full for O(1) shift search per angle.
+    """
+    import torch
+
+    a = part_eval_t.float() - torch.mean(part_eval_t)
+    b = ref_rot_t.float() - torch.mean(ref_rot_t)
+    sigma_a = torch.sqrt(torch.sum(a * a))
+    sigma_b = torch.sqrt(torch.sum(b * b))
+    if float(sigma_a) < 1e-12 or float(sigma_b) < 1e-12:
+        return None
+    fa = torch.fft.fftn(a)
+    fb = torch.fft.fftn(b)
+    corr = torch.fft.ifftn(torch.conj(fa) * fb).real
+    corr = torch.fft.ifftshift(corr)
+    ncc_vol = corr / (sigma_a * sigma_b)
+    return ncc_vol
+
+
+def _ncc_volume_fft_torch_batch(part_eval_t, ref_rot_batch):
+    """
+    Batch FFT NCC: part_eval_t [D,H,W], ref_rot_batch [B,D,H,W].
+    Returns [B,D,H,W] ncc_vol (jg_019 P0.2).
+    """
+    import torch
+
+    a = part_eval_t.float() - torch.mean(part_eval_t)
+    b = ref_rot_batch.float() - torch.mean(ref_rot_batch, dim=(1, 2, 3), keepdim=True)
+    sigma_a = torch.sqrt(torch.sum(a * a))
+    sigma_b = torch.sqrt(torch.sum(b * b, dim=(1, 2, 3)))
+    if float(sigma_a) < 1e-12 or torch.any(sigma_b < 1e-12):
+        return None
+    fa = torch.fft.fftn(a)
+    fb = torch.fft.fftn(b, dim=(-3, -2, -1))
+    corr = torch.fft.ifftn(torch.conj(fa) * fb, dim=(-3, -2, -1)).real
+    corr = torch.fft.ifftshift(corr, dim=(-3, -2, -1))
+    ncc_vol = corr / (sigma_a * sigma_b.view(-1, 1, 1, 1))
+    return ncc_vol
 
 
 def _local_normalized_cross_correlation_torch(
@@ -810,10 +1047,12 @@ def _align_single_scale_torch_gpu(
     wedge_apply_to: str = "both",
     subpixel_method: str = "auto",
     device=None,
+    gpu_angle_batch_size: int = 1,
 ) -> tuple:
     """Single-scale alignment where shift + NCC evaluation runs on GPU."""
     import torch
     import torch.nn.functional as F
+    global _ROSEMAN_APPROX_WARNED
 
     if device is None:
         device = torch.device("cuda")
@@ -880,6 +1119,16 @@ def _align_single_scale_torch_gpu(
     shifts = list(_iter_integer_shifts(shift_search, shift_mode, shift_center=shift_center))
     if not shifts:
         shifts = [(0, 0, 0)]
+    use_fft_ncc = (
+        str(cc_mode or "ncc").lower() == "ncc"
+        and (mask is None or np.all(mask))
+    )
+    shift_search_mask_t = None
+    if use_fft_ncc:
+        d, h, w = ref_src_t.shape
+        shift_search_mask_t = _build_shift_search_mask_torch(
+            d, h, w, shift_search, shift_mode, shift_center, device
+        )
     mode = str(angle_sampling_mode or "legacy").lower()
     if mode == "dynamo":
         cone_aperture = _normalize_aperture([tilt_lo, tilt_hi], 360.0)
@@ -902,39 +1151,140 @@ def _align_single_scale_torch_gpu(
                     t.append((float(tdrot), float(tilt), float(narot)))
         triplets = np.asarray(t, dtype=np.float32) if t else np.asarray([[0.0, 0.0, 0.0]], dtype=np.float32)
 
-    for tdrot, tilt, narot in triplets:
-        ref_t = _rotate_volume_torch_gpu(ref_src_t, float(tdrot), float(tilt), float(narot))
-        if use_template_wedge:
-            ref_t = torch.real(
-                torch.fft.ifftn(torch.fft.ifftshift(torch.fft.fftshift(torch.fft.fftn(ref_t)) * wm_t))
-            )
-        for sx, sy, sz in shifts:
-            dx, dy, dz = cx + sx, cy + sy, cz + sz
-            ref_shifted_t = _shift_tensor_zero(ref_t, int(dx), int(dy), int(dz))
-            cc_backend = str(cc_mode or "ncc").lower()
-            if cc_backend == "ncc":
-                cc = _ncc_torch(part_eval_t, ref_shifted_t, mask_t)
-            elif cc_backend == "roseman_local":
-                global _ROSEMAN_APPROX_WARNED
-                if not _ROSEMAN_APPROX_WARNED:
-                    warnings.warn(
-                        "cc_mode=roseman_local is an approximate local CC backend, not strict Dynamo parity",
-                        RuntimeWarning,
+    batch_size = max(1, int(gpu_angle_batch_size or 1))
+    n_triplets = len(triplets)
+    for batch_start in range(0, n_triplets, batch_size):
+        batch_end = min(batch_start + batch_size, n_triplets)
+        batch_triplets = triplets[batch_start:batch_end]
+        if batch_size <= 1 or len(batch_triplets) == 1:
+            for tdrot, tilt, narot in batch_triplets:
+                ref_t = _rotate_volume_torch_gpu(ref_src_t, float(tdrot), float(tilt), float(narot))
+                if use_template_wedge:
+                    ref_t = torch.real(
+                        torch.fft.ifftn(torch.fft.ifftshift(torch.fft.fftshift(torch.fft.fftn(ref_t)) * wm_t))
                     )
-                    _ROSEMAN_APPROX_WARNED = True
-                cc = _local_normalized_cross_correlation_torch(
-                    part_eval_t,
-                    ref_shifted_t,
-                    mask_t,
-                    win=cc_local_window,
-                    eps=cc_local_eps,
+                if use_fft_ncc:
+                    ncc_vol = _ncc_volume_fft_torch(part_eval_t, ref_t)
+                    if ncc_vol is not None and shift_search_mask_t is not None:
+                        nx, ny, nz = ref_t.shape
+                        mid = (nx // 2, ny // 2, nz // 2)
+                        ncc_masked = ncc_vol.clone()
+                        ncc_masked[~shift_search_mask_t] = -2.0
+                        best_flat = torch.argmax(ncc_masked).item()
+                        iz = best_flat % nz
+                        iy = (best_flat // nz) % ny
+                        ix = best_flat // (ny * nz)
+                        dx = float(ix - mid[0])
+                        dy = float(iy - mid[1])
+                        dz = float(iz - mid[2])
+                        cc = float(ncc_vol[ix, iy, iz])
+                        if cc > best_cc:
+                            best_cc = cc
+                            best_params = (float(tdrot), float(tilt), float(narot), dx, dy, dz)
+                            best_ref_t = ref_t.detach().clone()
+                        continue
+                for sx, sy, sz in shifts:
+                    dx, dy, dz = cx + sx, cy + sy, cz + sz
+                    ref_shifted_t = _shift_tensor_zero(ref_t, int(dx), int(dy), int(dz))
+                    cc_backend = str(cc_mode or "ncc").lower()
+                    if cc_backend == "ncc":
+                        cc = _ncc_torch(part_eval_t, ref_shifted_t, mask_t)
+                    elif cc_backend == "roseman_local":
+                        if not _ROSEMAN_APPROX_WARNED:
+                            warnings.warn(
+                                "cc_mode=roseman_local is an approximate local CC backend, not strict Dynamo parity",
+                                RuntimeWarning,
+                            )
+                            _ROSEMAN_APPROX_WARNED = True
+                        cc = _local_normalized_cross_correlation_torch(
+                            part_eval_t,
+                            ref_shifted_t,
+                            mask_t,
+                            win=cc_local_window,
+                            eps=cc_local_eps,
+                        )
+                    else:
+                        raise ValueError(f"Unsupported cc_mode: {cc_mode}")
+                    if cc > best_cc:
+                        best_cc = cc
+                        best_params = (float(tdrot), float(tilt), float(narot), float(dx), float(dy), float(dz))
+                        best_ref_t = ref_t.detach().clone()
+        else:
+            ref_rot_batch = _rotate_volume_torch_gpu_batch(ref_src_t, batch_triplets, device)
+            if use_template_wedge:
+                ref_rot_batch = torch.real(
+                    torch.fft.ifftn(torch.fft.ifftshift(torch.fft.fftshift(torch.fft.fftn(ref_rot_batch)) * wm_t))
                 )
-            else:
-                raise ValueError(f"Unsupported cc_mode: {cc_mode}")
-            if cc > best_cc:
-                best_cc = cc
-                best_params = (float(tdrot), float(tilt), float(narot), float(dx), float(dy), float(dz))
-                best_ref_t = ref_t.detach().clone()
+            if use_fft_ncc and shift_search_mask_t is not None:
+                ncc_vol_batch = _ncc_volume_fft_torch_batch(part_eval_t, ref_rot_batch)
+                if ncc_vol_batch is not None:
+                    nx, ny, nz = ref_rot_batch.shape[1], ref_rot_batch.shape[2], ref_rot_batch.shape[3]
+                    mid = (nx // 2, ny // 2, nz // 2)
+                    for i_angle, (tdrot, tilt, narot) in enumerate(batch_triplets):
+                        ncc_vol = ncc_vol_batch[i_angle]
+                        ncc_masked = ncc_vol.clone()
+                        ncc_masked[~shift_search_mask_t] = -2.0
+                        best_flat = torch.argmax(ncc_masked).item()
+                        iz = best_flat % nz
+                        iy = (best_flat // nz) % ny
+                        ix = best_flat // (ny * nz)
+                        dx = float(ix - mid[0])
+                        dy = float(iy - mid[1])
+                        dz = float(iz - mid[2])
+                        cc = float(ncc_vol[ix, iy, iz])
+                        if cc > best_cc:
+                            best_cc = cc
+                            best_params = (float(tdrot), float(tilt), float(narot), dx, dy, dz)
+                            best_ref_t = ref_rot_batch[i_angle].detach().clone()
+                    continue
+            for i_angle, (tdrot, tilt, narot) in enumerate(batch_triplets):
+                ref_t = ref_rot_batch[i_angle]
+                if use_fft_ncc:
+                    ncc_vol = _ncc_volume_fft_torch(part_eval_t, ref_t)
+                    if ncc_vol is not None and shift_search_mask_t is not None:
+                        nx, ny, nz = ref_t.shape
+                        mid = (nx // 2, ny // 2, nz // 2)
+                        ncc_masked = ncc_vol.clone()
+                        ncc_masked[~shift_search_mask_t] = -2.0
+                        best_flat = torch.argmax(ncc_masked).item()
+                        iz = best_flat % nz
+                        iy = (best_flat // nz) % ny
+                        ix = best_flat // (ny * nz)
+                        dx = float(ix - mid[0])
+                        dy = float(iy - mid[1])
+                        dz = float(iz - mid[2])
+                        cc = float(ncc_vol[ix, iy, iz])
+                        if cc > best_cc:
+                            best_cc = cc
+                            best_params = (float(tdrot), float(tilt), float(narot), dx, dy, dz)
+                            best_ref_t = ref_t.detach().clone()
+                        continue
+                for sx, sy, sz in shifts:
+                    dx, dy, dz = cx + sx, cy + sy, cz + sz
+                    ref_shifted_t = _shift_tensor_zero(ref_t, int(dx), int(dy), int(dz))
+                    cc_backend = str(cc_mode or "ncc").lower()
+                    if cc_backend == "ncc":
+                        cc = _ncc_torch(part_eval_t, ref_shifted_t, mask_t)
+                    elif cc_backend == "roseman_local":
+                        if not _ROSEMAN_APPROX_WARNED:
+                            warnings.warn(
+                                "cc_mode=roseman_local is an approximate local CC backend, not strict Dynamo parity",
+                                RuntimeWarning,
+                            )
+                            _ROSEMAN_APPROX_WARNED = True
+                        cc = _local_normalized_cross_correlation_torch(
+                            part_eval_t,
+                            ref_shifted_t,
+                            mask_t,
+                            win=cc_local_window,
+                            eps=cc_local_eps,
+                        )
+                    else:
+                        raise ValueError(f"Unsupported cc_mode: {cc_mode}")
+                    if cc > best_cc:
+                        best_cc = cc
+                        best_params = (float(tdrot), float(tilt), float(narot), float(dx), float(dy), float(dz))
+                        best_ref_t = ref_t.detach().clone()
 
     if subpixel and best_ref_t is not None:
         tdrot, tilt, narot, dx, dy, dz = best_params
@@ -1053,6 +1403,7 @@ def align_one_particle(
     subpixel_method: str = "auto",
     device: str = "cpu",
     device_id: int = None,
+    gpu_angle_batch_size: int = 1,
 ):
     """
     Search for best alignment of particle to reference.
@@ -1100,6 +1451,7 @@ def align_one_particle(
                 fsampling=fsampling, fsampling_mode=fsampling_mode,
                 subpixel_method=subpixel_method,
                 device_id=device_id,
+                gpu_angle_batch_size=gpu_angle_batch_size,
             )
         except RuntimeError:
             pass  # fallback to CPU when CUDA unavailable

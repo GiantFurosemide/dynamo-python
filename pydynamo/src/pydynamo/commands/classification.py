@@ -1,7 +1,9 @@
 """pydynamo classification — MRA: multireference alignment and classification."""
 import json
 import logging
+import queue
 import sys
+import threading
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -29,7 +31,23 @@ from ..runtime import (
 logger = logging.getLogger(__name__)
 
 # Process-local cache for classification CPU workers (ref_vols, align_mask, wedge_mask)
+# Used only when initializer is not used (num_workers==1 or legacy path).
 _classification_worker_cache = {}
+
+# Worker process globals (set via initializer when num_workers > 1; jg_016).
+_worker_ref_vols = None
+_worker_align_mask = None
+_worker_wedge_mask = None
+_worker_params = None
+
+
+def _classification_worker_init(ref_vols, align_mask, wedge_mask, params):
+    """Set ref_vols/mask/wedge/params in worker process so each worker loads them once (jg_016)."""
+    global _worker_ref_vols, _worker_align_mask, _worker_wedge_mask, _worker_params
+    _worker_ref_vols = ref_vols
+    _worker_align_mask = align_mask
+    _worker_wedge_mask = wedge_mask
+    _worker_params = params
 
 
 def _resolve_particle_path(p_path, base_dir: Path, subtomograms) -> Path:
@@ -90,9 +108,7 @@ def _classification_cpu_worker(payload: dict):
 
     try:
         with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
-            part = np.asarray(mrc.data, dtype=np.float32)
-            if not part.flags.writeable:
-                part = part.copy()
+            part = np.asarray(mrc.data, dtype=np.float32, copy=False)
     except Exception:
         return 0, None, None
     if part.shape != ref_vols[0].shape:
@@ -212,6 +228,302 @@ def _classification_cpu_worker(payload: dict):
     return best_ref, best_row, tr
 
 
+def _classification_cpu_worker_impl(payload: dict):
+    """
+    Run one classification task using process-global ref_vols/mask/wedge/params (CPU path).
+    payload: pidx, p_path, full_path, seed_row, swap, ref_to_align.
+    Returns (best_ref, best_row, tr) or (0, None, None) on failure.
+    """
+    global _worker_ref_vols, _worker_align_mask, _worker_wedge_mask, _worker_params
+    ref_vols = _worker_ref_vols
+    align_mask = _worker_align_mask
+    wedge_mask = _worker_wedge_mask
+    params = _worker_params
+
+    pidx = payload["pidx"]
+    full_path = payload["full_path"]
+    seed_row = payload["seed_row"]
+    swap = payload["swap"]
+    ref_to_align = payload.get("ref_to_align")
+
+    try:
+        with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
+            part = np.asarray(mrc.data, dtype=np.float32, copy=False)
+    except Exception:
+        return 0, None, None
+    if part.shape != ref_vols[0].shape:
+        return 0, None, None
+
+    nref = len(ref_vols)
+    refs_to_align = range(nref) if swap else [max(0, min(nref - 1, ref_to_align or 0))]
+    best_cc = -2
+    best_ref = 0
+    best_row = None
+
+    wedge_ftype = int(params.get("wedge_ftype", 1))
+    seed = (
+        float(seed_row.get("tdrot", 0.0)),
+        float(seed_row.get("tilt", 0.0)),
+        float(seed_row.get("narot", 0.0)),
+    )
+    fsampling = None
+    if seed_row:
+        fsampling = {
+            "ftype": seed_row.get("ftype", wedge_ftype),
+            "ymintilt": seed_row.get("ymintilt", float(params.get("wedge_ymin", -48))),
+            "ymaxtilt": seed_row.get("ymaxtilt", float(params.get("wedge_ymax", 48))),
+            "xmintilt": seed_row.get("xmintilt", float(params.get("wedge_xmin", -60))),
+            "xmaxtilt": seed_row.get("xmaxtilt", float(params.get("wedge_xmax", 60))),
+            "fs1": seed_row.get("fs1", np.nan),
+            "fs2": seed_row.get("fs2", np.nan),
+        }
+
+    align_kw = (
+        "cone_step", "tdrot_step", "tdrot_range", "cone_range", "inplane_step", "inplane_range",
+        "shift_search", "lowpass_angstrom", "pixel_size", "multigrid_levels", "shift_mode", "subpixel",
+        "cc_mode", "cc_local_window", "cc_local_eps", "angle_sampling_mode", "wedge_apply_to",
+        "fsampling_mode", "subpixel_method",
+    )
+    params_for_align = {k: v for k, v in params.items() if k in align_kw}
+
+    for r in refs_to_align:
+        tdrot, tilt, narot, dx, dy, dz, cc = align_one_particle(
+            part,
+            ref_vols[r],
+            mask=align_mask,
+            old_angles=seed,
+            wedge_mask=wedge_mask,
+            fsampling=fsampling,
+            device="cpu",
+            device_id=None,
+            **params_for_align,
+        )
+        row = dict(seed_row)
+        row.update({
+            "tag": pidx + 1,
+            "tdrot": tdrot,
+            "tilt": tilt,
+            "narot": narot,
+            "dx": dx,
+            "dy": dy,
+            "dz": dz,
+            "cc": cc,
+            "cc2": cc,
+            "ref": r + 1,
+            "aligned": 1,
+            "averaged": 1,
+            "x": row.get("x", 0),
+            "y": row.get("y", 0),
+            "z": row.get("z", 0),
+            "rlnImageName": str(full_path),
+            "particle_idx": pidx,
+        })
+        if cc > best_cc:
+            best_cc = cc
+            best_ref = r
+            best_row = row
+    if best_row is None:
+        return 0, None, None
+    tr = apply_inverse_transform(
+        part,
+        float(best_row["tdrot"]),
+        float(best_row["tilt"]),
+        float(best_row["narot"]),
+        float(best_row["dx"]),
+        float(best_row["dy"]),
+        float(best_row["dz"]),
+    )
+    if align_mask is not None:
+        tr = tr * align_mask
+    return best_ref, best_row, tr
+
+
+def _classification_chunk_worker_impl(payload: dict):
+    """
+    Run classification for a chunk of particles using process-global ref_vols/mask/wedge/params.
+    payload: indices, paths_chunk [(p_path, full_path), ...], seed_rows_chunk, swap, ref_to_align_chunk,
+             prefetch_queue_size (optional, 0=disabled).
+    Returns (rows_list, per_ref_local_acc_list) where rows_list is [(best_ref, best_row), ...].
+    """
+    global _worker_ref_vols, _worker_align_mask, _worker_wedge_mask, _worker_params
+    ref_vols = _worker_ref_vols
+    align_mask = _worker_align_mask
+    wedge_mask = _worker_wedge_mask
+    params = _worker_params
+
+    indices = payload["indices"]
+    paths_chunk = payload["paths_chunk"]
+    seed_rows_chunk = payload["seed_rows_chunk"]
+    swap = payload["swap"]
+    ref_to_align_chunk = payload.get("ref_to_align_chunk", [])
+    prefetch_size = max(0, int(payload.get("prefetch_queue_size", 0)))
+
+    nref = len(ref_vols)
+    per_ref_local_acc = [np.zeros_like(ref_vols[0], dtype=np.float64) for _ in range(nref)]
+    rows_list = []
+
+    align_kw = (
+        "cone_step", "tdrot_step", "tdrot_range", "cone_range", "inplane_step", "inplane_range",
+        "shift_search", "lowpass_angstrom", "pixel_size", "multigrid_levels", "shift_mode", "subpixel",
+        "cc_mode", "cc_local_window", "cc_local_eps", "angle_sampling_mode", "wedge_apply_to",
+        "fsampling_mode", "subpixel_method",
+    )
+    params_for_align = {k: v for k, v in params.items() if k in align_kw}
+
+    def _load_particle(full_path):
+        try:
+            with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
+                return np.asarray(mrc.data, dtype=np.float32, copy=False)
+        except Exception:
+            return None
+
+    def _prefetcher(q, items):
+        for j, (pidx, (p_path, full_path), seed_row) in enumerate(items):
+            ref_to_align = ref_to_align_chunk[j] if j < len(ref_to_align_chunk) else None
+            part = _load_particle(full_path)
+            q.put((pidx, p_path, full_path, seed_row, ref_to_align, part))
+        q.put(None)
+
+    if prefetch_size > 0:
+        q = queue.Queue(maxsize=min(prefetch_size, len(paths_chunk)))
+        items = list(zip(indices, paths_chunk, seed_rows_chunk))
+        t = threading.Thread(target=_prefetcher, args=(q, items))
+        t.daemon = True
+        t.start()
+        item_iter = iter(lambda: q.get(), None)
+    else:
+        def _serial_iter():
+            for j, (pidx, (p_path, full_path), seed_row) in enumerate(zip(indices, paths_chunk, seed_rows_chunk)):
+                ref_to_align = ref_to_align_chunk[j] if j < len(ref_to_align_chunk) else None
+                part = _load_particle(full_path)
+                yield (pidx, p_path, full_path, seed_row, ref_to_align, part)
+        item_iter = _serial_iter()
+
+    for pidx, p_path, full_path, seed_row, ref_to_align, part in item_iter:
+        if part is None or part.shape != ref_vols[0].shape:
+            continue
+
+        refs_to_align = range(nref) if swap else [max(0, min(nref - 1, ref_to_align or 0))]
+        best_cc = -2
+        best_ref = 0
+        best_row = None
+
+        wedge_ftype = int(params.get("wedge_ftype", 1))
+        seed = (
+            float(seed_row.get("tdrot", 0.0)),
+            float(seed_row.get("tilt", 0.0)),
+            float(seed_row.get("narot", 0.0)),
+        )
+        fsampling = None
+        if seed_row:
+            fsampling = {
+                "ftype": seed_row.get("ftype", wedge_ftype),
+                "ymintilt": seed_row.get("ymintilt", float(params.get("wedge_ymin", -48))),
+                "ymaxtilt": seed_row.get("ymaxtilt", float(params.get("wedge_ymax", 48))),
+                "xmintilt": seed_row.get("xmintilt", float(params.get("wedge_xmin", -60))),
+                "xmaxtilt": seed_row.get("xmaxtilt", float(params.get("wedge_xmax", 60))),
+                "fs1": seed_row.get("fs1", np.nan),
+                "fs2": seed_row.get("fs2", np.nan),
+            }
+
+        if swap and nref > 1:
+            max_ref_workers = min(nref, 8)
+            with ThreadPoolExecutor(max_workers=max_ref_workers) as ref_ex:
+                def _align_ref(r):
+                    tdrot, tilt, narot, dx, dy, dz, cc = align_one_particle(
+                        part,
+                        ref_vols[r],
+                        mask=align_mask,
+                        old_angles=seed,
+                        wedge_mask=wedge_mask,
+                        fsampling=fsampling,
+                        device="cpu",
+                        device_id=None,
+                        **params_for_align,
+                    )
+                    row = dict(seed_row)
+                    row.update({
+                        "tag": pidx + 1,
+                        "tdrot": tdrot,
+                        "tilt": tilt,
+                        "narot": narot,
+                        "dx": dx,
+                        "dy": dy,
+                        "dz": dz,
+                        "cc": cc,
+                        "cc2": cc,
+                        "ref": r + 1,
+                        "aligned": 1,
+                        "averaged": 1,
+                        "x": row.get("x", 0),
+                        "y": row.get("y", 0),
+                        "z": row.get("z", 0),
+                        "rlnImageName": str(full_path),
+                        "particle_idx": pidx,
+                    })
+                    return (r, cc, row)
+                results = list(ref_ex.map(_align_ref, refs_to_align))
+            for r, cc, row in results:
+                if cc > best_cc:
+                    best_cc = cc
+                    best_ref = r
+                    best_row = row
+        else:
+            for r in refs_to_align:
+                tdrot, tilt, narot, dx, dy, dz, cc = align_one_particle(
+                    part,
+                    ref_vols[r],
+                    mask=align_mask,
+                    old_angles=seed,
+                    wedge_mask=wedge_mask,
+                    fsampling=fsampling,
+                    device="cpu",
+                    device_id=None,
+                    **params_for_align,
+                )
+                row = dict(seed_row)
+                row.update({
+                    "tag": pidx + 1,
+                    "tdrot": tdrot,
+                    "tilt": tilt,
+                    "narot": narot,
+                    "dx": dx,
+                    "dy": dy,
+                    "dz": dz,
+                    "cc": cc,
+                    "cc2": cc,
+                    "ref": r + 1,
+                    "aligned": 1,
+                    "averaged": 1,
+                    "x": row.get("x", 0),
+                    "y": row.get("y", 0),
+                    "z": row.get("z", 0),
+                    "rlnImageName": str(full_path),
+                    "particle_idx": pidx,
+                })
+                if cc > best_cc:
+                    best_cc = cc
+                    best_ref = r
+                    best_row = row
+        if best_row is None:
+            continue
+        tr = apply_inverse_transform(
+            part,
+            float(best_row["tdrot"]),
+            float(best_row["tilt"]),
+            float(best_row["narot"]),
+            float(best_row["dx"]),
+            float(best_row["dy"]),
+            float(best_row["dz"]),
+        )
+        if align_mask is not None:
+            tr = tr * align_mask
+        per_ref_local_acc[best_ref] += tr
+        rows_list.append((best_ref, best_row))
+
+    return (rows_list, per_ref_local_acc)
+
+
 def run(config_path: str, rest: list, args) -> int:
     """Run classification (MRA) command. Returns exit code."""
     config = _load_config(config_path, args)
@@ -250,6 +562,7 @@ def run(config_path: str, rest: list, args) -> int:
     mask_path = config.get("nmask")
     progress_log_every = max(1, int(config.get("progress_log_every", 10)))
     num_workers = resolve_cpu_workers(config.get("num_workers"), default=1)
+    chunk_size_raw = config.get("chunk_size", 100)
     resume = bool(config.get("resume", False))
     resume_from_iteration = config.get("resume_from_iteration")
     mask_consistency_min_fraction = float(config.get("mask_consistency_min_fraction", 0.01))
@@ -262,6 +575,7 @@ def run(config_path: str, rest: list, args) -> int:
     wedge_ymax = float(config.get("wedge_ymax", 48))
     wedge_xmin = float(config.get("wedge_xmin", -60))
     wedge_xmax = float(config.get("wedge_xmax", 60))
+    prefetch_queue_size = max(0, int(config.get("prefetch_queue_size", 2)))
 
     if not all([particles, subtomograms, references, output_dir]):
         _err("Missing required: particles, subtomograms, references, output_dir", args, config=config, config_path=config_path)
@@ -286,6 +600,13 @@ def run(config_path: str, rest: list, args) -> int:
         paths = sorted(sub_dir.glob("*.mrc")) + sorted(sub_dir.glob("*.mrcs"))
         paths = [str(p) for p in paths]
     base_dir = Path(particles).parent if isinstance(particles, str) else Path(".")
+    path_tuples = [(pidx, p_path) for pidx, p_path in enumerate(paths)]
+    path_tuples.sort(key=lambda x: str(_resolve_particle_path(x[1], base_dir, subtomograms)))
+
+    if chunk_size_raw in (0, "0", "auto", None):
+        chunk_size = max(50, min(200, len(path_tuples) // max(1, num_workers * 4)))
+    else:
+        chunk_size = max(1, int(chunk_size_raw))
 
     # Load references
     ref_vols = []
@@ -347,15 +668,16 @@ def run(config_path: str, rest: list, args) -> int:
             max_iterations,
         )
 
-    def _align_particle_task(pidx, p_path):
+    def _align_particle_task(pidx, p_path, part_preloaded=None):
         full_path = _resolve_particle_path(p_path, base_dir, subtomograms)
-        try:
-            with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
-                part = np.asarray(mrc.data, dtype=np.float32)
-                if not part.flags.writeable:
-                    part = part.copy()
-        except Exception:
-            return None, None, None
+        if part_preloaded is not None:
+            part = part_preloaded
+        else:
+            try:
+                with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
+                    part = np.asarray(mrc.data, dtype=np.float32, copy=False)
+            except Exception:
+                return None, None, None
         if part.shape != ref_vols[0].shape:
             return None, None, None
 
@@ -385,7 +707,7 @@ def run(config_path: str, rest: list, args) -> int:
         if resolved_device == "cuda" and gpu_ids:
             local_device_id = gpu_ids[pidx % len(gpu_ids)]
 
-        for r in refs_to_align:
+        def _align_ref(r):
             tdrot, tilt, narot, dx, dy, dz, cc = align_one_particle(
                 part, ref_vols[r],
                 mask=align_mask,
@@ -417,10 +739,24 @@ def run(config_path: str, rest: list, args) -> int:
                 "rlnImageName": str(full_path),
                 "particle_idx": pidx,
             })
-            if cc > best_cc:
-                best_cc = cc
-                best_ref = r
-                best_row = row
+            return (r, cc, row)
+
+        if swap and nref > 1 and resolved_device == "cuda":
+            max_ref_workers = min(nref, 8)
+            with ThreadPoolExecutor(max_workers=max_ref_workers) as ref_ex:
+                results = list(ref_ex.map(_align_ref, refs_to_align))
+            for r, cc, row in results:
+                if cc > best_cc:
+                    best_cc = cc
+                    best_ref = r
+                    best_row = row
+        else:
+            for r in refs_to_align:
+                _, cc, row = _align_ref(r)
+                if cc > best_cc:
+                    best_cc = cc
+                    best_ref = r
+                    best_row = row
         if best_row is None:
             return 0, None, None
         tr = apply_inverse_transform(
@@ -445,16 +781,45 @@ def run(config_path: str, rest: list, args) -> int:
         per_ref_counts = [0 for _ in range(nref)]
         per_ref_acc = [np.zeros((sidelength, sidelength, sidelength), dtype=np.float64) for _ in range(nref)]
         per_ref_used = [0 for _ in range(nref)]
-        ite_total = len(paths)
+        ite_total = len(path_tuples)
         ite_processed = 0
         ite_success = 0
         ite_failed = 0
         ite_start = time.time()
         ref_paths_resolved = [resolve_path(r, config_path) for r in refs]
-        if resolved_device == "cuda" and len(gpu_ids) > 1 and len(paths) > 1:
+        if resolved_device == "cuda" and len(gpu_ids) > 1 and len(path_tuples) > 1:
             logger.info("Classification multi-GPU scheduling on devices: %s", gpu_ids)
+            use_prefetch = prefetch_queue_size > 0
+            if use_prefetch:
+                prefetch_q = queue.Queue(maxsize=min(prefetch_queue_size, len(path_tuples)))
+
+                def _class_prefetcher():
+                    for pidx, p_path in path_tuples:
+                        full_path = _resolve_particle_path(p_path, base_dir, subtomograms)
+                        try:
+                            with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
+                                part = np.asarray(mrc.data, dtype=np.float32, copy=False)
+                        except Exception:
+                            part = None
+                        prefetch_q.put((pidx, p_path, part))
+                    prefetch_q.put(None)
+
+                prefetch_t = threading.Thread(target=_class_prefetcher, daemon=True)
+                prefetch_t.start()
+                task_iter = iter(lambda: prefetch_q.get(), None)
+            else:
+                task_iter = ((pidx, p_path, None) for pidx, p_path in path_tuples)
+
             with ThreadPoolExecutor(max_workers=len(gpu_ids)) as ex:
-                futures = [ex.submit(_align_particle_task, pidx, p_path) for pidx, p_path in enumerate(paths)]
+                futures = {}
+                for item in task_iter:
+                    if item is None:
+                        break
+                    pidx, p_path, part = item
+                    if part is not None and part.shape == ref_vols[0].shape:
+                        futures[ex.submit(_align_particle_task, pidx, p_path, part)] = (pidx, p_path)
+                    else:
+                        futures[ex.submit(_align_particle_task, pidx, p_path)] = (pidx, p_path)
                 for f in progress_iter(as_completed(futures), total=len(futures), desc=f"classify ite{ite+1}"):
                     ite_processed += 1
                     try:
@@ -483,61 +848,181 @@ def run(config_path: str, rest: list, args) -> int:
                             ite_failed,
                             progress_timing_text(ite_start, ite_processed, ite_total),
                         )
-        elif resolved_device == "cpu" and num_workers > 1 and len(paths) > 1:
-            logger.info("Classification CPU multi-process with num_workers=%d", num_workers)
-            payloads = []
-            for pidx, p_path in enumerate(paths):
-                full_path = _resolve_particle_path(p_path, base_dir, subtomograms)
-                seed_row = tbl_df.iloc[pidx].to_dict() if pidx < len(tbl_df) else {}
-                ref_to_align = None
-                if not swap and ref_tables and len(ref_tables) > 0 and pidx < len(ref_tables[0]):
-                    ref_to_align = max(0, min(nref - 1, int(ref_tables[0].iloc[pidx].get("ref", 1)) - 1))
-                payloads.append({
-                    "config_path": config_path,
-                    "config": config,
-                    "ref_paths": ref_paths_resolved,
-                    "pidx": pidx,
-                    "p_path": p_path,
-                    "full_path": str(full_path),
-                    "seed_row": seed_row,
-                    "swap": swap,
-                    "ref_to_align": ref_to_align,
-                })
-            with ProcessPoolExecutor(max_workers=num_workers) as ex:
-                futures = [ex.submit(_classification_cpu_worker, p) for p in payloads]
-                for f in progress_iter(as_completed(futures), total=len(futures), desc=f"classify ite{ite+1}"):
-                    ite_processed += 1
-                    try:
-                        best_ref, best_row, tr = f.result()
-                        if best_row is not None:
-                            best_row["ref"] = best_ref + 1
-                            best_row["grep_average"] = 1
-                            row_fhs[best_ref].write(json.dumps(best_row, ensure_ascii=True) + "\n")
-                            per_ref_counts[best_ref] += 1
-                            if tr is not None:
-                                per_ref_acc[best_ref] += tr
+        elif resolved_device == "cpu" and num_workers > 1 and len(path_tuples) > 1:
+            use_chunk = chunk_size > 1
+            logger.info(
+                "Classification CPU multi-process with num_workers=%d chunk_size=%d (ref/mask shared per worker)",
+                num_workers,
+                chunk_size,
+            )
+            align_params = {
+                "cone_step": cone_step,
+                "tdrot_step": tdrot_step,
+                "tdrot_range": tdrot_range,
+                "cone_range": cone_range,
+                "inplane_step": inplane_step,
+                "inplane_range": inplane_range,
+                "shift_search": shift_search,
+                "lowpass_angstrom": lowpass,
+                "pixel_size": pixel_size,
+                "multigrid_levels": multigrid_levels,
+                "shift_mode": shift_mode,
+                "subpixel": subpixel,
+                "cc_mode": cc_mode,
+                "cc_local_window": cc_local_window,
+                "cc_local_eps": cc_local_eps,
+                "angle_sampling_mode": angle_sampling_mode,
+                "wedge_apply_to": wedge_apply_to,
+                "fsampling_mode": fsampling_mode,
+                "subpixel_method": subpixel_method,
+                "wedge_ftype": wedge_ftype,
+                "wedge_ymin": wedge_ymin,
+                "wedge_ymax": wedge_ymax,
+                "wedge_xmin": wedge_xmin,
+                "wedge_xmax": wedge_xmax,
+                "gpu_angle_batch_size": max(1, int(config.get("gpu_angle_batch_size", 32))),
+            }
+            if use_chunk:
+                chunks = []
+                for start in range(0, len(path_tuples), chunk_size):
+                    end = min(start + chunk_size, len(path_tuples))
+                    slice_tuples = path_tuples[start:end]
+                    indices = [p[0] for p in slice_tuples]
+                    paths_chunk = [
+                        (p[1], str(_resolve_particle_path(p[1], base_dir, subtomograms)))
+                        for p in slice_tuples
+                    ]
+                    seed_rows_chunk = [tbl_df.iloc[pidx].to_dict() if pidx < len(tbl_df) else {} for pidx in indices]
+                    ref_to_align_chunk = []
+                    for pidx in indices:
+                        ref_to_align = None
+                        if not swap and ref_tables and len(ref_tables) > 0 and pidx < len(ref_tables[0]):
+                            ref_to_align = max(0, min(nref - 1, int(ref_tables[0].iloc[pidx].get("ref", 1)) - 1))
+                        ref_to_align_chunk.append(ref_to_align)
+                    chunks.append({
+                        "indices": indices,
+                        "paths_chunk": paths_chunk,
+                        "seed_rows_chunk": seed_rows_chunk,
+                        "swap": swap,
+                        "ref_to_align_chunk": ref_to_align_chunk,
+                        "prefetch_queue_size": prefetch_queue_size,
+                    })
+                with ProcessPoolExecutor(
+                    max_workers=num_workers,
+                    initializer=_classification_worker_init,
+                    initargs=(ref_vols, align_mask, wedge_mask, align_params),
+                ) as ex:
+                    futures = {ex.submit(_classification_chunk_worker_impl, c): c for c in chunks}
+                    for f in progress_iter(as_completed(futures), total=len(futures), desc=f"classify ite{ite+1}"):
+                        c = futures.get(f, {})
+                        n_chunk = len(c.get("indices", []))
+                        try:
+                            rows_list, per_ref_local_acc = f.result()
+                            for best_ref, best_row in rows_list:
+                                best_row["ref"] = best_ref + 1
+                                best_row["grep_average"] = 1
+                                row_fhs[best_ref].write(json.dumps(best_row, ensure_ascii=True) + "\n")
+                                per_ref_counts[best_ref] += 1
                                 per_ref_used[best_ref] += 1
-                            ite_success += 1
-                        else:
+                                ite_success += 1
+                            for r in range(nref):
+                                per_ref_acc[r] += per_ref_local_acc[r]
+                            ite_failed += n_chunk - len(rows_list)
+                        except Exception as e:
+                            ite_failed += n_chunk
+                            logger.warning("Classification chunk failed: %s", e)
+                        ite_processed += n_chunk
+                        if ite_processed % progress_log_every == 0 or ite_processed == ite_total:
+                            logger.info(
+                                "Classification iteration %d progress %d/%d (success=%d failed=%d, %s)",
+                                ite + 1,
+                                ite_processed,
+                                ite_total,
+                                ite_success,
+                                ite_failed,
+                                progress_timing_text(ite_start, ite_processed, ite_total),
+                            )
+            else:
+                payloads = []
+                for pidx, p_path in path_tuples:
+                    full_path = _resolve_particle_path(p_path, base_dir, subtomograms)
+                    seed_row = tbl_df.iloc[pidx].to_dict() if pidx < len(tbl_df) else {}
+                    ref_to_align = None
+                    if not swap and ref_tables and len(ref_tables) > 0 and pidx < len(ref_tables[0]):
+                        ref_to_align = max(0, min(nref - 1, int(ref_tables[0].iloc[pidx].get("ref", 1)) - 1))
+                    payloads.append({
+                        "pidx": pidx,
+                        "p_path": p_path,
+                        "full_path": str(full_path),
+                        "seed_row": seed_row,
+                        "swap": swap,
+                        "ref_to_align": ref_to_align,
+                    })
+                with ProcessPoolExecutor(
+                    max_workers=num_workers,
+                    initializer=_classification_worker_init,
+                    initargs=(ref_vols, align_mask, wedge_mask, align_params),
+                ) as ex:
+                    futures = [ex.submit(_classification_cpu_worker_impl, p) for p in payloads]
+                    for f in progress_iter(as_completed(futures), total=len(futures), desc=f"classify ite{ite+1}"):
+                        ite_processed += 1
+                        try:
+                            best_ref, best_row, tr = f.result()
+                            if best_row is not None:
+                                best_row["ref"] = best_ref + 1
+                                best_row["grep_average"] = 1
+                                row_fhs[best_ref].write(json.dumps(best_row, ensure_ascii=True) + "\n")
+                                per_ref_counts[best_ref] += 1
+                                if tr is not None:
+                                    per_ref_acc[best_ref] += tr
+                                    per_ref_used[best_ref] += 1
+                                ite_success += 1
+                            else:
+                                ite_failed += 1
+                        except Exception as e:
+                            logger.warning("Classification task failed: %s", e)
                             ite_failed += 1
-                    except Exception as e:
-                        logger.warning("Classification task failed: %s", e)
-                        ite_failed += 1
-                    if ite_processed % progress_log_every == 0 or ite_processed == ite_total:
-                        logger.info(
-                            "Classification iteration %d progress %d/%d (success=%d failed=%d, %s)",
-                            ite + 1,
-                            ite_processed,
-                            ite_total,
-                            ite_success,
-                            ite_failed,
-                            progress_timing_text(ite_start, ite_processed, ite_total),
-                        )
+                        if ite_processed % progress_log_every == 0 or ite_processed == ite_total:
+                            logger.info(
+                                "Classification iteration %d progress %d/%d (success=%d failed=%d, %s)",
+                                ite + 1,
+                                ite_processed,
+                                ite_total,
+                                ite_success,
+                                ite_failed,
+                                progress_timing_text(ite_start, ite_processed, ite_total),
+                            )
         else:
-            for pidx, p_path in progress_iter(list(enumerate(paths)), total=len(paths), desc=f"classify ite{ite+1}"):
+            if resolved_device == "cuda" and prefetch_queue_size > 0 and len(path_tuples) > 1:
+                prefetch_q = queue.Queue(maxsize=min(prefetch_queue_size, len(path_tuples)))
+
+                def _class_prefetcher_single():
+                    for pidx, p_path in path_tuples:
+                        full_path = _resolve_particle_path(p_path, base_dir, subtomograms)
+                        try:
+                            with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
+                                part = np.asarray(mrc.data, dtype=np.float32, copy=False)
+                        except Exception:
+                            part = None
+                        prefetch_q.put((pidx, p_path, part))
+                    prefetch_q.put(None)
+
+                prefetch_t = threading.Thread(target=_class_prefetcher_single, daemon=True)
+                prefetch_t.start()
+                task_iter = iter(lambda: prefetch_q.get(), None)
+            else:
+                task_iter = ((pidx, p_path, None) for pidx, p_path in path_tuples)
+
+            for item in progress_iter(task_iter, total=len(path_tuples), desc=f"classify ite{ite+1}"):
+                if item is None:
+                    break
+                pidx, p_path, part = item
                 ite_processed += 1
                 try:
-                    best_ref, best_row, tr = _align_particle_task(pidx, p_path)
+                    if part is not None and part.shape == ref_vols[0].shape:
+                        best_ref, best_row, tr = _align_particle_task(pidx, p_path, part)
+                    else:
+                        best_ref, best_row, tr = _align_particle_task(pidx, p_path)
                     if best_row is not None:
                         best_row["ref"] = best_ref + 1
                         best_row["grep_average"] = 1

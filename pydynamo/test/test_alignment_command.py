@@ -685,3 +685,65 @@ def test_alignment_tbl_fsampling_mode_passes_table_fsampling(tmp_path: Path, mon
     non_none = [v for v in captured["fsamplings"] if v is not None]
     assert len(non_none) >= 1
     assert int(float(non_none[0]["ftype"])) == 1
+
+
+def test_alignment_chunk_size_equivalence(tmp_path: Path):
+    """chunk_size=1 and chunk_size=100 produce equivalent outputs (p_017, f_016)."""
+    sub_dir = tmp_path / "subtomos"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    ref = np.zeros((8, 8, 8), dtype=np.float32)
+    ref[3:5, 3:5, 3:5] = 1.0
+    ref_path = tmp_path / "ref_chunk.mrc"
+    _write_mrc(ref_path, ref)
+    n_particles = 4
+    particles_df = pd.DataFrame(
+        {
+            "tag": list(range(1, n_particles + 1)),
+            "rlnImageName": [str(sub_dir / f"particle_{i:06d}.mrc") for i in range(1, n_particles + 1)],
+            "rlnMicrographName": ["tomo1"] * n_particles,
+            "x": [4.0] * n_particles,
+            "y": [4.0] * n_particles,
+            "z": [4.0] * n_particles,
+        }
+    )
+    for i in range(1, n_particles + 1):
+        _write_mrc(sub_dir / f"particle_{i:06d}.mrc", ref)
+    particles_star = tmp_path / "particles_chunk.star"
+    starfile.write(particles_df, str(particles_star), overwrite=True)
+
+    def _run(chunk_size: int):
+        out_tbl = tmp_path / f"out_c{chunk_size}.tbl"
+        out_avg = tmp_path / f"avg_c{chunk_size}.mrc"
+        cfg = {
+            "particles": str(particles_star),
+            "subtomograms": str(sub_dir),
+            "reference": str(ref_path),
+            "output_table": str(out_tbl),
+            "output_average": str(out_avg),
+            "cone_step": 90,
+            "inplane_step": 90,
+            "shift_search": 1,
+            "multigrid_levels": 1,
+            "device": "cpu",
+            "num_workers": 2,
+            "chunk_size": chunk_size,
+        }
+        cfg_path = tmp_path / f"align_c{chunk_size}.yaml"
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, sort_keys=False)
+        args = SimpleNamespace(log_level="warning", json_errors=False, log_file=None)
+        rc = alignment.run(str(cfg_path), [], args)
+        assert rc == 0
+        tbl_df = read_dynamo_tbl(str(out_tbl))
+        tbl_df = tbl_df.sort_values("tag").reset_index(drop=True)
+        avg = mrcfile.open(str(out_avg), mode="r", permissive=True).data
+        return tbl_df, avg
+
+    df1, avg1 = _run(1)
+    df2, avg2 = _run(100)
+
+    key_cols = ["tdrot", "tilt", "narot", "dx", "dy", "dz", "cc"]
+    for c in key_cols:
+        if c in df1.columns and c in df2.columns:
+            np.testing.assert_allclose(df1[c].values, df2[c].values, atol=1e-4, rtol=1e-3)
+    np.testing.assert_allclose(avg1, avg2, atol=1e-4, rtol=1e-3)

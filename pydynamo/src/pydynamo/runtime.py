@@ -226,7 +226,7 @@ def load_realspace_mask(
     if not resolved:
         return None
     with mrcfile.open(resolved, mode="r", permissive=True) as mrc:
-        mask = np.asarray(mrc.data, dtype=np.float32).copy()
+        mask = np.asarray(mrc.data, dtype=np.float32, copy=False)
     if expected_shape is not None and tuple(mask.shape) != tuple(expected_shape):
         raise ValueError(
             f"nmask shape {tuple(mask.shape)} != expected {tuple(expected_shape)}"

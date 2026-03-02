@@ -20,9 +20,9 @@ output_average: null              # optional aligned average output .mrc; null d
 average_symmetry: c1              # symmetry applied to aligned average volume (c1,c2,c4,...)
 
 # --- Search ---
-cone_step: 15.0                   # tilt angular step in degrees
-cone_range: [0, 180]              # cone aperture [min,max] in degrees around old orientation
-inplane_step: 15.0                # inplane angular step in degrees
+cone_step: 15.0                   # tilt angular step in degrees (exploration: try 30 for faster coarse search)
+cone_range: [0, 180]             # cone aperture [min,max] in degrees around old orientation
+inplane_step: 15.0               # inplane angular step in degrees (exploration: try 30)
 inplane_range: [0, 360]           # inplane aperture [min,max] in degrees around seed narot
 shift_search: 3                   # translational search radius in voxels
 shift_mode: cube                  # shift search region: cube|ellipsoid_center|ellipsoid_follow|center_only|cylinder_z_center|cylinder_z_follow
@@ -32,6 +32,8 @@ cc_mode: ncc                      # correlation backend: ncc|roseman_local
 cc_local_window: 5               # local correlation window size (odd voxels) for roseman_local
 cc_local_eps: 1.0e-8             # numerical epsilon for local variance stabilization
 multigrid_levels: 2               # coarse-to-fine levels, 1 means single-scale
+# coarse_cone_step: 30            # (reserved) multigrid coarse stage; null=use cone_step*2 (f_018 F3)
+# coarse_inplane_step: 30         # (reserved) multigrid coarse stage; null=use inplane_step*2
 apply_wedge_scoring: false        # true enables wedge-aware Fourier support scoring
 fsampling_mode: none              # none|table : use tbl fsampling columns to build per-particle wedge support
 wedge_apply_to: auto              # auto|both|particle|template : which side receives wedge support in scoring
@@ -46,12 +48,17 @@ device: auto                      # execution device: cpu|cuda|auto (auto uses a
 device_id: null                   # optional single GPU id override (e.g., 0)
 gpu_ids: null                     # optional explicit GPU id list (e.g., [0,1]); null means all detected GPUs
 num_workers: 1                    # CPU path only: process workers (1=single; <=0 auto: cpu_count-1)
+chunk_size: 100                   # CPU multi-process: particles per chunk; 0/auto=adaptive (50-200 for 60k)
+prefetch_queue_size: 2             # chunk preload: 0=disabled, 2-4 for I/O overlap (jg_018 P1.1)
+gpu_angle_batch_size: 32          # GPU path: angles per batch for rotation+NCC (P1.4); 1=disable batching
 
 # --- Filter ---
 lowpass: null                     # optional lowpass cutoff in Angstrom; null disables lowpass
 
 # --- Masks ---
-nmask: null                       # optional real-space mask (.mrc); e.g. mask.mrc; nonzero voxels used in alignment CC
+nmask: null                       # optional real-space mask (.mrc); nonzero voxels used in alignment CC.
+                                  # WARNING: non-full mask (nmask) disables FFT NCC and falls back to per-shift realspace CC,
+                                  # which can be 10-100x slower per particle. Prefer full mask or larger coverage when possible.
 mask_consistency_min_fraction: 0.01  # warn when mask support fraction is below this threshold
 fmask: null                       # optional Fourier mask file path (reserved)
 fmask_classification: null        # optional classification Fourier mask path (reserved)

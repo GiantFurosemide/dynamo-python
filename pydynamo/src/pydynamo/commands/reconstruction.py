@@ -88,9 +88,7 @@ def _reconstruction_chunk_worker(payload: dict):
             full_path = _resolve_particle_path(p_path, base_dir, subtomograms)
             try:
                 with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
-                    vol = np.asarray(mrc.data, dtype=np.float32)
-                    if not vol.flags.writeable:
-                        vol = vol.copy()
+                    vol = np.asarray(mrc.data, dtype=np.float32, copy=False)
             except Exception:
                 continue
             if vol.shape[0] != sidelength or vol.shape[1] != sidelength or vol.shape[2] != sidelength:
@@ -111,9 +109,7 @@ def _reconstruction_chunk_worker(payload: dict):
             full_path = _resolve_particle_path(p_path, base_dir, subtomograms)
             try:
                 with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
-                    vol = np.asarray(mrc.data, dtype=np.float32)
-                    if not vol.flags.writeable:
-                        vol = vol.copy()
+                    vol = np.asarray(mrc.data, dtype=np.float32, copy=False)
             except Exception:
                 continue
             if vol.shape[0] != sidelength or vol.shape[1] != sidelength or vol.shape[2] != sidelength:
@@ -324,9 +320,7 @@ def run(config_path: str, rest: list, args) -> int:
                 # Read-only view + copy only when not writeable (P2 particle I/O strategy).
                 try:
                     with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
-                        vol = np.asarray(mrc.data, dtype=np.float32)
-                        if not vol.flags.writeable:
-                            vol = vol.copy()
+                        vol = np.asarray(mrc.data, dtype=np.float32, copy=False)
                 except Exception as e:
                     logger.warning("Failed to load %s: %s", full_path, e)
                     n_fail += 1
@@ -411,9 +405,7 @@ def run(config_path: str, rest: list, args) -> int:
                 # Read-only view + copy only when not writeable (P2 particle I/O strategy).
                 try:
                     with mrcfile.open(str(full_path), mode="r", permissive=True) as mrc:
-                        vol = np.asarray(mrc.data, dtype=np.float32)
-                        if not vol.flags.writeable:
-                            vol = vol.copy()
+                        vol = np.asarray(mrc.data, dtype=np.float32, copy=False)
                 except Exception as e:
                     logger.warning("Failed to load %s: %s", full_path, e)
                     n_fail += 1

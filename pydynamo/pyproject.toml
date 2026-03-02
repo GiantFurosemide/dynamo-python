@@ -22,6 +22,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov"]
+perf = ["numba>=0.56"]  # optional: faster CPU rotate_volume (jg_018 P0.1)
 
 [project.scripts]
 pydynamo = "pydynamo.cli:main"
